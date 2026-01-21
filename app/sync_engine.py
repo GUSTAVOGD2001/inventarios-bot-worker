@@ -76,12 +76,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 logger.warning("No SKUs in Shopify snapshot; skipping sync")
                 return
 
-            ddvc_map = fetch_ddvc_full(
-                graphql_url=settings.ddvc_graphql,
-                page_size=settings.ddvc_page_size,
-                sleep_seconds=settings.ddvc_sleep_seconds,
-                timeout_s=settings.ddvc_timeout,
-            )
+            ddvc_map = fetch_ddvc_full(graphql_url=settings.ddvc_graphql)
             ddvc_rows = len(ddvc_map)
 
             inventory_updates: List[Tuple[str, int]] = []
