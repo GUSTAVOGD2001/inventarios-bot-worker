@@ -15,7 +15,7 @@ from sqlalchemy import (
     create_engine,
     text,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 
 metadata = MetaData()
@@ -74,6 +74,169 @@ def get_engine(database_url: str) -> Engine:
 
 def init_db(engine: Engine) -> None:
     metadata.create_all(engine)
+
+
+def ensure_schema(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS sync_runs (
+                  run_id TEXT PRIMARY KEY,
+                  slot_ts TIMESTAMP,
+                  started_at TIMESTAMP NOT NULL,
+                  finished_at TIMESTAMP,
+                  dry_run BOOLEAN NOT NULL,
+                  found_count INT DEFAULT 0,
+                  not_found_count INT DEFAULT 0,
+                  inventory_changes INT DEFAULT 0,
+                  price_changes INT DEFAULT 0,
+                  ddvc_rows INT DEFAULT 0,
+                  shopify_rows INT DEFAULT 0,
+                  error TEXT
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS sync_actions (
+                  id BIGSERIAL PRIMARY KEY,
+                  run_id TEXT NOT NULL,
+                  sku_norm TEXT NOT NULL,
+                  action_type TEXT NOT NULL,
+                  old_value TEXT,
+                  new_value TEXT,
+                  status TEXT NOT NULL,
+                  error TEXT,
+                  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_sync_actions_run ON sync_actions(run_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_sync_actions_sku ON sync_actions(sku_norm)"))
+
+
+def try_lock(conn: Connection) -> bool:
+    result = conn.execute(text("SELECT pg_try_advisory_lock(987654321)")).scalar()
+    return bool(result)
+
+
+def release_lock(conn: Connection) -> None:
+    conn.execute(text("SELECT pg_advisory_unlock(987654321)"))
+
+
+def insert_sync_run(
+    engine: Engine,
+    run_id: str,
+    slot_ts: dt.datetime,
+    started_at: dt.datetime,
+    dry_run: bool,
+) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO sync_runs (run_id, slot_ts, started_at, dry_run)
+                VALUES (:run_id, :slot_ts, :started_at, :dry_run)
+                """
+            ),
+            {
+                "run_id": run_id,
+                "slot_ts": slot_ts,
+                "started_at": started_at,
+                "dry_run": dry_run,
+            },
+        )
+
+
+def update_sync_run(
+    engine: Engine,
+    run_id: str,
+    finished_at: dt.datetime,
+    found_count: int,
+    not_found_count: int,
+    inventory_changes: int,
+    price_changes: int,
+    ddvc_rows: int,
+    shopify_rows: int,
+    error: Optional[str],
+) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE sync_runs
+                SET finished_at = :finished_at,
+                    found_count = :found_count,
+                    not_found_count = :not_found_count,
+                    inventory_changes = :inventory_changes,
+                    price_changes = :price_changes,
+                    ddvc_rows = :ddvc_rows,
+                    shopify_rows = :shopify_rows,
+                    error = :error
+                WHERE run_id = :run_id
+                """
+            ),
+            {
+                "run_id": run_id,
+                "finished_at": finished_at,
+                "found_count": found_count,
+                "not_found_count": not_found_count,
+                "inventory_changes": inventory_changes,
+                "price_changes": price_changes,
+                "ddvc_rows": ddvc_rows,
+                "shopify_rows": shopify_rows,
+                "error": error,
+            },
+        )
+
+
+def insert_sync_action(
+    engine: Engine,
+    run_id: str,
+    sku_norm: str,
+    action_type: str,
+    old_value: Optional[str],
+    new_value: Optional[str],
+    status: str,
+) -> int:
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO sync_actions (run_id, sku_norm, action_type, old_value, new_value, status)
+                VALUES (:run_id, :sku_norm, :action_type, :old_value, :new_value, :status)
+                RETURNING id
+                """
+            ),
+            {
+                "run_id": run_id,
+                "sku_norm": sku_norm,
+                "action_type": action_type,
+                "old_value": old_value,
+                "new_value": new_value,
+                "status": status,
+            },
+        )
+        return int(result.scalar_one())
+
+
+def update_sync_action_status(engine: Engine, action_id: int, status: str, error: Optional[str] = None) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE sync_actions
+                SET status = :status,
+                    error = :error
+                WHERE id = :id
+                """
+            ),
+            {"id": action_id, "status": status, "error": error},
+        )
 
 
 def get_kv(engine: Engine, key: str) -> Optional[str]:

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import Settings, load_settings
-from app.db import get_engine, get_kv, init_db, set_kv
+from app.db import ensure_schema, get_engine, get_kv, init_db, set_kv
 from app.logging_setup import set_run_id, setup_logging
 from app.shopify_client import ShopifyClient
 from app.sync_engine import run_sync_once
@@ -61,6 +61,7 @@ def main() -> None:
 
     engine = get_engine(settings.database_url)
     init_db(engine)
+    ensure_schema(engine)
 
     shopify = ShopifyClient(
         shop=settings.shopify_shop,
@@ -81,7 +82,7 @@ def main() -> None:
                     set_kv(engine, LAST_RUN_SLOT_KEY, slot_id)
                     logger.info("Starting sync for slot %s", slot_id)
                     try:
-                        run_sync_once(settings, engine, shopify)
+                        run_sync_once(settings, engine, shopify, run_id)
                     except Exception:
                         logger.exception("Sync run failed")
                 else:
