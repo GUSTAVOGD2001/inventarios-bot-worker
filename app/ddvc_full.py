@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import logging
 import time
+from os import getenv
 from typing import Dict, Optional
 
 import requests
 
-from app.sku_utils import normalize_sku
-
 logger = logging.getLogger(__name__)
 
-QUERY_PRODUCTS_MIN = """
+QUERY_PRODUCTS = """
 query GetAllProducts($pageSize: Int!, $currentPage: Int!) {
   products(
     filter: {}
@@ -34,33 +33,25 @@ query GetAllProducts($pageSize: Int!, $currentPage: Int!) {
 """
 
 
+class GraphQLError(RuntimeError):
+    pass
+
+
 def gql(graphql_url: str, query: str, variables: dict, timeout_s: float) -> dict:
     response = requests.post(graphql_url, json={"query": query, "variables": variables}, timeout=timeout_s)
     response.raise_for_status()
     data = response.json()
-    if data.get("errors"):
-        raise RuntimeError(f"GraphQL errors: {data['errors']}")
+    errors = data.get("errors")
+    if errors:
+        logger.error("DDVC GraphQL errors: %s | query=%s | variables=%s", errors, query, variables)
+        raise GraphQLError(f"GraphQL errors: {errors}")
     return data
 
 
-def _parse_price(node: Optional[dict]) -> Optional[float]:
-    if not node:
-        return None
-    value = node.get("value")
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def fetch_ddvc_full(
-    graphql_url: str,
-    page_size: int,
-    sleep_seconds: float,
-    timeout_s: float,
-) -> Dict[str, Dict[str, Optional[float]]]:
+def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
+    page_size = int(getenv("DDVC_PAGE_SIZE", "100"))
+    sleep_seconds = float(getenv("DDVC_SLEEP_SECONDS", "0.35"))
+    timeout = int(getenv("DDVC_TIMEOUT", "90"))
     start_time = time.monotonic()
     current_page = 1
     total_pages = 1
@@ -69,16 +60,18 @@ def fetch_ddvc_full(
     fail_pages = 0
     results: Dict[str, Dict[str, Optional[float]]] = {}
 
-    logger.info("DDVC full fetch starting page_size=%s", page_size)
+    logger.info("DDVC full fetch: page_size=%s timeout=%s", page_size, timeout)
 
     while current_page <= total_pages:
         try:
             payload = gql(
                 graphql_url,
-                QUERY_PRODUCTS_MIN,
+                QUERY_PRODUCTS,
                 {"pageSize": page_size, "currentPage": current_page},
-                timeout_s,
+                timeout,
             )
+        except GraphQLError:
+            raise
         except Exception as exc:
             fail_pages += 1
             logger.warning("DDVC full fetch failed page=%s error=%s", current_page, exc)
@@ -93,21 +86,19 @@ def fetch_ddvc_full(
         items = products.get("items") or []
 
         if current_page == 1:
-            logger.info("DDVC full fetch first page total_count=%s total_pages=%s", total_count, total_pages)
+            logger.info("DDVC total_count=%s total_pages=%s", total_count, total_pages)
 
         for item in items:
             if not item:
                 continue
-            sku = normalize_sku(item.get("sku"))
-            if sku:
-                sku = sku.strip()
-            if not sku:
+            sku = (item.get("sku") or "").strip()
+            if sku == "":
                 continue
             min_price = item.get("price_range", {}).get("minimum_price", {})
             results[sku] = {
                 "is_salable": item.get("is_salable"),
-                "regular_price": _parse_price(min_price.get("regular_price")),
-                "final_price": _parse_price(min_price.get("final_price")),
+                "regular_price": min_price.get("regular_price", {}).get("value"),
+                "final_price": min_price.get("final_price", {}).get("value"),
             }
 
         if current_page >= total_pages:
