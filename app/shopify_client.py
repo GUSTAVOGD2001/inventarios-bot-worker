@@ -20,6 +20,15 @@ class ShopifyVariant:
     inventory_item_id: str
 
 
+@dataclass
+class ShopifyVariantSnapshot:
+    sku: str
+    variant_id: str
+    inventory_item_id: str
+    price: float
+    quantity: int
+
+
 class ShopifyClient:
     def __init__(self, shop: str, client_id: str, client_secret: str, api_version: str) -> None:
         self.shop = shop
@@ -138,6 +147,64 @@ class ShopifyClient:
                     continue
                 variants.append(
                     ShopifyVariant(sku=sku, variant_id=variant_id, inventory_item_id=inventory_item_id)
+                )
+            page_info = payload.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+        return variants
+
+    def fetch_variant_snapshot(self, location_id: str) -> List[ShopifyVariantSnapshot]:
+        variants: List[ShopifyVariantSnapshot] = []
+        cursor: Optional[str] = None
+        while True:
+            query = """
+            query ($cursor: String, $locationId: ID!) {
+                productVariants(first: 250, after: $cursor) {
+                    pageInfo {
+                        hasNextPage
+                        endCursor
+                    }
+                    nodes {
+                        id
+                        sku
+                        price
+                        inventoryItem {
+                            id
+                            inventoryLevel(locationId: $locationId) {
+                                available
+                            }
+                        }
+                    }
+                }
+            }
+            """
+            data = self._post_graphql(query, {"cursor": cursor, "locationId": location_id})
+            payload = data.get("data", {}).get("productVariants", {})
+            nodes = payload.get("nodes", [])
+            for node in nodes:
+                sku = normalize_sku(node.get("sku"))
+                variant_id = node.get("id")
+                inventory_item = node.get("inventoryItem") or {}
+                inventory_item_id = inventory_item.get("id")
+                inventory_level = inventory_item.get("inventoryLevel") or {}
+                available = inventory_level.get("available")
+                price_raw = node.get("price")
+                if not sku or not variant_id or not inventory_item_id:
+                    continue
+                try:
+                    price = float(price_raw)
+                except (TypeError, ValueError):
+                    continue
+                quantity = int(available) if available is not None else 0
+                variants.append(
+                    ShopifyVariantSnapshot(
+                        sku=sku,
+                        variant_id=variant_id,
+                        inventory_item_id=inventory_item_id,
+                        price=price,
+                        quantity=quantity,
+                    )
                 )
             page_info = payload.get("pageInfo", {})
             if not page_info.get("hasNextPage"):
