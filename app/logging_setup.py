@@ -6,12 +6,13 @@ from typing import Optional
 
 
 class RunIdFilter(logging.Filter):
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: Optional[str] = None) -> None:
         super().__init__()
-        self.run_id = run_id
+        self.run_id = run_id or "-"
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.run_id = self.run_id
+        if not hasattr(record, "run_id"):
+            record.run_id = self.run_id or "-"
         return True
 
 
@@ -22,7 +23,9 @@ def setup_logging(run_id: str, level: Optional[int] = None) -> RunIdFilter:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
     run_filter = RunIdFilter(run_id)
-    logging.getLogger().addFilter(run_filter)
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        handler.addFilter(run_filter)
     return run_filter
 
 
