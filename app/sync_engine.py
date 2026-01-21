@@ -11,12 +11,29 @@ from app import db
 from app.config import Settings
 from app.ddvc_client import DdvcItem, fetch_ddvc_chunks
 from app.shopify_client import ShopifyClient
+from app.sku_utils import normalize_sku
 
 logger = logging.getLogger(__name__)
 
 
-def _chunk_list(items: List[str], size: int) -> List[List[str]]:
-    return [items[i : i + size] for i in range(0, len(items), size)]
+def _normalize_variant_map(variant_map: Dict[str, db.VariantInfo]) -> Dict[str, db.VariantInfo]:
+    normalized: Dict[str, db.VariantInfo] = {}
+    for sku, info in variant_map.items():
+        normalized_sku = normalize_sku(sku)
+        if not normalized_sku:
+            continue
+        normalized[normalized_sku] = info
+    return normalized
+
+
+def _normalize_sku_states(states: Dict[str, db.SkuState]) -> Dict[str, db.SkuState]:
+    normalized: Dict[str, db.SkuState] = {}
+    for sku, state in states.items():
+        normalized_sku = normalize_sku(sku)
+        if not normalized_sku:
+            continue
+        normalized[normalized_sku] = state
+    return normalized
 
 
 def _needs_variant_refresh(last_refresh: str | None) -> bool:
@@ -50,6 +67,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient) ->
         db.set_kv(engine, "variants_refreshed_at", dt.datetime.now(dt.timezone.utc).isoformat())
         variant_map = db.load_variant_map(engine)
         logger.info("Variant map refreshed: %s items", len(variant_map))
+    variant_map = _normalize_variant_map(variant_map)
 
     skus = list(variant_map.keys())
     if not skus:
@@ -57,7 +75,6 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient) ->
         return
 
     logger.info("Fetching DDVC data for %s SKUs", len(skus))
-    chunks = _chunk_list(skus, settings.chunk_size)
     ok_count, total_chunks, ddvc_results, failed_chunks = asyncio.run(
         fetch_ddvc_chunks(settings.ddvc_graphql, skus, settings.chunk_size, settings.concurrency)
     )
@@ -69,13 +86,20 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient) ->
         success_rate,
     )
 
-    states = db.load_sku_states(engine)
+    states = _normalize_sku_states(db.load_sku_states(engine))
     inventory_updates: List[tuple[str, int]] = []
     price_updates: List[tuple[str, float]] = []
     not_found_count = 0
     skipped_count = 0
     updated_inventory = 0
     updated_price = 0
+    regular_price_count = sum(1 for item in ddvc_results.values() if item.has_regular_price)
+    final_only_count = len(ddvc_results) - regular_price_count
+    logger.info(
+        "DDVC prices regular_price=%s final_price_only=%s",
+        regular_price_count,
+        final_only_count,
+    )
 
     now = dt.datetime.now(dt.timezone.utc)
     apply_not_found = success_rate >= 0.95
@@ -86,7 +110,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient) ->
         if sku in ddvc_results:
             item: DdvcItem = ddvc_results[sku]
             target_qty = settings.in_stock_qty if item.is_salable else settings.out_of_stock_qty
-            desired_price = item.final_price
+            desired_price = item.ddvc_price
             state = states.get(sku)
             if state is None or state.target_qty != target_qty:
                 info = variant_map.get(sku)

@@ -8,6 +8,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import httpx
 
+from app.sku_utils import normalize_sku
+
 logger = logging.getLogger(__name__)
 
 
@@ -129,7 +131,7 @@ class ShopifyClient:
             payload = data.get("data", {}).get("productVariants", {})
             nodes = payload.get("nodes", [])
             for node in nodes:
-                sku = node.get("sku")
+                sku = normalize_sku(node.get("sku"))
                 variant_id = node.get("id")
                 inventory_item_id = node.get("inventoryItem", {}).get("id")
                 if not sku or not variant_id or not inventory_item_id:
