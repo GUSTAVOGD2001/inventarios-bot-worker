@@ -11,26 +11,25 @@ from app.sku_utils import normalize_sku
 logger = logging.getLogger(__name__)
 
 QUERY_PRODUCTS_MIN = """
-query ($pageSize: Int!, $currentPage: Int!) {
-    products(pageSize: $pageSize, currentPage: $currentPage) {
-        total_count
-        page_info {
-            current_page
-            total_pages
+query GetAllProducts($pageSize: Int!, $currentPage: Int!) {
+  products(
+    filter: {}
+    pageSize: $pageSize
+    currentPage: $currentPage
+  ) {
+    items {
+      sku
+      is_salable
+      price_range {
+        minimum_price {
+          regular_price { value currency }
+          final_price { value currency }
         }
-        items {
-            sku
-            is_salable
-            price_range {
-                minimum_price {
-                    regular_price {
-                        value
-                        currency
-                    }
-                }
-            }
-        }
+      }
     }
+    page_info { current_page total_pages }
+    total_count
+  }
 }
 """
 
@@ -66,35 +65,49 @@ def fetch_ddvc_full(
     current_page = 1
     total_pages = 1
     total_count = 0
+    ok_pages = 0
+    fail_pages = 0
     results: Dict[str, Dict[str, Optional[float]]] = {}
 
+    logger.info("DDVC full fetch starting page_size=%s", page_size)
+
     while current_page <= total_pages:
-        payload = gql(
-            graphql_url,
-            QUERY_PRODUCTS_MIN,
-            {"pageSize": page_size, "currentPage": current_page},
-            timeout_s,
-        )
+        try:
+            payload = gql(
+                graphql_url,
+                QUERY_PRODUCTS_MIN,
+                {"pageSize": page_size, "currentPage": current_page},
+                timeout_s,
+            )
+        except Exception as exc:
+            fail_pages += 1
+            logger.warning("DDVC full fetch failed page=%s error=%s", current_page, exc)
+            current_page += 1
+            continue
+
+        ok_pages += 1
         products = payload.get("data", {}).get("products", {})
         total_count = products.get("total_count") or total_count
         page_info = products.get("page_info") or {}
         total_pages = page_info.get("total_pages") or total_pages
         items = products.get("items") or []
 
+        if current_page == 1:
+            logger.info("DDVC full fetch first page total_count=%s total_pages=%s", total_count, total_pages)
+
         for item in items:
             if not item:
                 continue
             sku = normalize_sku(item.get("sku"))
+            if sku:
+                sku = sku.strip()
             if not sku:
                 continue
-            price_node = (
-                item.get("price_range", {})
-                .get("minimum_price", {})
-                .get("regular_price")
-            )
+            min_price = item.get("price_range", {}).get("minimum_price", {})
             results[sku] = {
                 "is_salable": item.get("is_salable"),
-                "regular_price": _parse_price(price_node),
+                "regular_price": _parse_price(min_price.get("regular_price")),
+                "final_price": _parse_price(min_price.get("final_price")),
             }
 
         if current_page >= total_pages:
@@ -105,10 +118,10 @@ def fetch_ddvc_full(
 
     elapsed = time.monotonic() - start_time
     logger.info(
-        "DDVC full snapshot total_count=%s pages=%s rows_collected=%s elapsed=%.2fs",
-        total_count,
-        total_pages,
+        "DDVC full fetch done rows=%s ok_pages=%s fail_pages=%s elapsed=%.2fs",
         len(results),
+        ok_pages,
+        fail_pages,
         elapsed,
     )
     return results
