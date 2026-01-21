@@ -26,7 +26,7 @@ class ShopifyVariantSnapshot:
     variant_id: str
     inventory_item_id: str
     price: float
-    quantity: int
+    quantity: Optional[int]
 
 
 class ShopifyClient:
@@ -154,12 +154,12 @@ class ShopifyClient:
             cursor = page_info.get("endCursor")
         return variants
 
-    def fetch_variant_snapshot(self, location_id: str) -> List[ShopifyVariantSnapshot]:
+    def fetch_variant_snapshot(self, location_id: Optional[str]) -> List[ShopifyVariantSnapshot]:
         variants: List[ShopifyVariantSnapshot] = []
         cursor: Optional[str] = None
         while True:
             query = """
-            query ($cursor: String, $locationId: ID!) {
+            query ($cursor: String) {
                 productVariants(first: 250, after: $cursor) {
                     pageInfo {
                         hasNextPage
@@ -171,15 +171,28 @@ class ShopifyClient:
                         price
                         inventoryItem {
                             id
-                            inventoryLevel(locationId: $locationId) {
-                                available
+                            inventoryLevels(first: 10) {
+                                edges {
+                                    node {
+                                        location {
+                                            id
+                                        }
+                                        quantities(names: ["available"]) {
+                                            name
+                                            quantity
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
             """
-            data = self._post_graphql(query, {"cursor": cursor, "locationId": location_id})
+            data = self._post_graphql(query, {"cursor": cursor})
+            if data.get("errors"):
+                logger.error("Shopify GraphQL errors: %s", json.dumps(data["errors"]))
+                raise RuntimeError("Shopify GraphQL errors while fetching snapshot")
             payload = data.get("data", {}).get("productVariants", {})
             nodes = payload.get("nodes", [])
             for node in nodes:
@@ -187,8 +200,27 @@ class ShopifyClient:
                 variant_id = node.get("id")
                 inventory_item = node.get("inventoryItem") or {}
                 inventory_item_id = inventory_item.get("id")
-                inventory_level = inventory_item.get("inventoryLevel") or {}
-                available = inventory_level.get("available")
+                inventory_levels = inventory_item.get("inventoryLevels", {}).get("edges", [])
+                level_node: Optional[dict] = None
+                if location_id:
+                    for edge in inventory_levels:
+                        node_data = edge.get("node") or {}
+                        location = node_data.get("location") or {}
+                        if location.get("id") == location_id:
+                            level_node = node_data
+                            break
+                if level_node is None and inventory_levels:
+                    level_node = (inventory_levels[0].get("node") or {})
+                available: Optional[int] = None
+                if level_node:
+                    quantities = level_node.get("quantities") or []
+                    for entry in quantities:
+                        if entry.get("name") == "available":
+                            try:
+                                available = int(entry.get("quantity"))
+                            except (TypeError, ValueError):
+                                available = None
+                            break
                 price_raw = node.get("price")
                 if not sku or not variant_id or not inventory_item_id:
                     continue
@@ -196,7 +228,7 @@ class ShopifyClient:
                     price = float(price_raw)
                 except (TypeError, ValueError):
                     continue
-                quantity = int(available) if available is not None else 0
+                quantity = available
                 variants.append(
                     ShopifyVariantSnapshot(
                         sku=sku,
