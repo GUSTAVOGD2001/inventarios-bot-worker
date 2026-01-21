@@ -7,6 +7,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import httpx
 
+from app.sku_utils import normalize_sku
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,7 +16,8 @@ logger = logging.getLogger(__name__)
 class DdvcItem:
     sku: str
     is_salable: bool
-    final_price: float
+    ddvc_price: float
+    has_regular_price: bool
 
 
 class DdvcClient:
@@ -32,6 +35,9 @@ class DdvcClient:
                     is_salable
                     price_range {
                         minimum_price {
+                            regular_price {
+                                value
+                            }
                             final_price {
                                 value
                             }
@@ -76,21 +82,33 @@ class DdvcClient:
         for item in items or []:
             if not item:
                 continue
-            sku = item.get("sku")
+            sku = normalize_sku(item.get("sku"))
             if not sku:
                 continue
             is_salable = bool(item.get("is_salable"))
-            price = self._extract_price(item)
-            if price is None:
+            regular_price, final_price = self._extract_prices(item)
+            ddvc_price = regular_price if regular_price is not None else final_price
+            if ddvc_price is None:
                 continue
-            results.append(DdvcItem(sku=sku, is_salable=is_salable, final_price=price))
+            results.append(
+                DdvcItem(
+                    sku=sku,
+                    is_salable=is_salable,
+                    ddvc_price=ddvc_price,
+                    has_regular_price=regular_price is not None,
+                )
+            )
         return results
 
-    def _extract_price(self, item: dict) -> Optional[float]:
+    def _extract_prices(self, item: dict) -> Tuple[Optional[float], Optional[float]]:
         price_range = item.get("price_range") or {}
         minimum_price = price_range.get("minimum_price") or {}
-        final_price = minimum_price.get("final_price") or {}
-        value = final_price.get("value")
+        regular_price = self._parse_price(minimum_price.get("regular_price") or {})
+        final_price = self._parse_price(minimum_price.get("final_price") or {})
+        return regular_price, final_price
+
+    def _parse_price(self, price_node: dict) -> Optional[float]:
+        value = price_node.get("value")
         if value is None:
             return None
         try:
@@ -105,7 +123,8 @@ async def fetch_ddvc_chunks(
     chunk_size: int,
     concurrency: int,
 ) -> Tuple[int, int, Dict[str, DdvcItem], Dict[int, List[str]]]:
-    skus_list = list(skus)
+    skus_list = [normalize_sku(sku) for sku in skus]
+    skus_list = [sku for sku in skus_list if sku]
     chunks = [skus_list[i : i + chunk_size] for i in range(0, len(skus_list), chunk_size)]
     client = DdvcClient(graphql_url, concurrency)
 
@@ -117,10 +136,31 @@ async def fetch_ddvc_chunks(
 
     ok_count = 0
     for idx, (ok, items) in enumerate(responses):
+        chunk = chunks[idx]
+        returned_skus = set(items.keys()) if ok else set()
+        missing = [sku for sku in chunk if sku not in returned_skus]
+        logger.info(
+            "DDVC chunk index=%s size_sent=%s items_returned=%s missing_count_in_chunk=%s sample_missing=%s",
+            idx,
+            len(chunk),
+            len(returned_skus),
+            len(missing),
+            missing[:10],
+        )
         if ok:
             ok_count += 1
             results.update(items)
         else:
             failed_chunks[idx] = chunks[idx]
+
+    found_list = [sku for sku in skus_list if sku in results]
+    not_found_list = [sku for sku in skus_list if sku not in results]
+    logger.info(
+        "DDVC found_count=%s not_found_count=%s sample_found=%s sample_not_found=%s",
+        len(found_list),
+        len(not_found_list),
+        found_list[:10],
+        not_found_list[:10],
+    )
 
     return ok_count, len(chunks), results, failed_chunks
