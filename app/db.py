@@ -67,6 +67,8 @@ class SkuState:
 
 
 def get_engine(database_url: str) -> Engine:
+    if database_url.startswith("postgres://"):
+        database_url = "postgresql://" + database_url[len("postgres://") :]
     return create_engine(database_url, pool_pre_ping=True, future=True)
 
 
