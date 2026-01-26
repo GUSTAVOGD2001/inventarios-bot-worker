@@ -54,6 +54,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
         error_message: Optional[str] = None
         found_count = 0
         not_found_count = 0
+        skipped_count = 0
         inventory_changes = 0
         price_changes = 0
         ddvc_rows = 0
@@ -78,6 +79,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
 
             ddvc_map = fetch_ddvc_full(graphql_url=settings.ddvc_graphql)
             ddvc_rows = len(ddvc_map)
+            logger.info("DDVC map ready rows=%s", ddvc_rows)
 
             inventory_updates: List[Tuple[str, int]] = []
             price_updates: List[Tuple[str, float]] = []
@@ -85,6 +87,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             price_actions: List[Tuple[int, str, float]] = []
 
             for sku_norm, shopify_item in shopify_map.items():
+                planned_action = False
                 ddvc_item = ddvc_map.get(sku_norm)
                 if ddvc_item:
                     found_count += 1
@@ -110,6 +113,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                         )
                         inventory_actions.append((action_id, shopify_item.inventory_item_id, qty_target))
                         inventory_updates.append((shopify_item.inventory_item_id, qty_target))
+                        planned_action = True
 
                     if regular_price is not None and abs(shopify_item.price - regular_price) > 0.01:
                         action_id = db.insert_sync_action(
@@ -123,6 +127,9 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                         )
                         price_actions.append((action_id, shopify_item.variant_id, regular_price))
                         price_updates.append((shopify_item.variant_id, regular_price))
+                        planned_action = True
+                    if not planned_action:
+                        skipped_count += 1
                 else:
                     not_found_count += 1
                     if not_found_action == "out_of_stock" and shopify_item.quantity != settings.out_of_stock_qty:
@@ -137,10 +144,27 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                         )
                         inventory_actions.append((action_id, shopify_item.inventory_item_id, settings.out_of_stock_qty))
                         inventory_updates.append((shopify_item.inventory_item_id, settings.out_of_stock_qty))
+                        planned_action = True
+                    if not planned_action:
+                        skipped_count += 1
 
             inventory_changes = len(inventory_actions)
             price_changes = len(price_actions)
 
+            logger.info(
+                "Compare result shopify=%s ddvc=%s found=%s not_found=%s",
+                shopify_rows,
+                ddvc_rows,
+                found_count,
+                not_found_count,
+            )
+            logger.info(
+                "Planned updates inventory=%s price=%s not_found=%s skipped=%s",
+                inventory_changes,
+                price_changes,
+                not_found_count,
+                skipped_count,
+            )
             logger.info(
                 "Compare found=%s not_found=%s inventory_changes=%s price_changes=%s",
                 found_count,
@@ -149,6 +173,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 price_changes,
             )
 
+            logger.info("Applying Shopify updates... dry_run=%s", settings.dry_run)
             if settings.dry_run:
                 logger.info("DRY_RUN enabled. Skipping Shopify updates.")
             else:
