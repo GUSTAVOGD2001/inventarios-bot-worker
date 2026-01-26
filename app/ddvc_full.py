@@ -52,6 +52,8 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
     page_size = int(getenv("DDVC_PAGE_SIZE", "100"))
     sleep_seconds = float(getenv("DDVC_SLEEP_SECONDS", "0.35"))
     timeout = int(getenv("DDVC_TIMEOUT", "90"))
+    retry_limit = 3
+    progress_interval = 5
     start_time = time.monotonic()
     current_page = 1
     total_pages = 1
@@ -63,18 +65,29 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
     logger.info("DDVC full fetch: page_size=%s timeout=%s", page_size, timeout)
 
     while current_page <= total_pages:
-        try:
-            payload = gql(
-                graphql_url,
-                QUERY_PRODUCTS,
-                {"pageSize": page_size, "currentPage": current_page},
-                timeout,
-            )
-        except GraphQLError:
-            raise
-        except Exception as exc:
+        payload = None
+        for attempt in range(1, retry_limit + 1):
+            try:
+                payload = gql(
+                    graphql_url,
+                    QUERY_PRODUCTS,
+                    {"pageSize": page_size, "currentPage": current_page},
+                    timeout,
+                )
+                break
+            except Exception as exc:
+                logger.warning(
+                    "DDVC full fetch failed page=%s attempt=%s/%s error=%s",
+                    current_page,
+                    attempt,
+                    retry_limit,
+                    exc,
+                )
+                if attempt < retry_limit and sleep_seconds > 0:
+                    time.sleep(sleep_seconds)
+
+        if payload is None:
             fail_pages += 1
-            logger.warning("DDVC full fetch failed page=%s error=%s", current_page, exc)
             current_page += 1
             continue
 
@@ -101,6 +114,14 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
                 "final_price": min_price.get("final_price", {}).get("value"),
             }
 
+        if current_page % progress_interval == 0 or current_page == total_pages:
+            logger.info(
+                "DDVC progress page=%s/%s rows=%s",
+                current_page,
+                total_pages,
+                len(results),
+            )
+
         if current_page >= total_pages:
             break
         if sleep_seconds > 0:
@@ -108,9 +129,9 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
         current_page += 1
 
     elapsed = time.monotonic() - start_time
+    logger.info("DDVC full fetch done rows=%s pages=%s", len(results), total_pages)
     logger.info(
-        "DDVC full fetch done rows=%s ok_pages=%s fail_pages=%s elapsed=%.2fs",
-        len(results),
+        "DDVC full fetch summary ok_pages=%s fail_pages=%s elapsed=%.2fs",
         ok_pages,
         fail_pages,
         elapsed,
