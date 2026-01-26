@@ -59,6 +59,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
         price_changes = 0
         ddvc_rows = 0
         shopify_rows = 0
+        MAX_SAMPLES = 20
         run_inserted = False
 
         try:
@@ -152,26 +153,29 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             price_changes = len(price_actions)
 
             logger.info(
-                "Compare result shopify=%s ddvc=%s found=%s not_found=%s",
+                "COMPARE SUMMARY shopify=%s ddvc=%s found=%s not_found=%s skipped=%s",
                 shopify_rows,
                 ddvc_rows,
                 found_count,
                 not_found_count,
-            )
-            logger.info(
-                "Planned updates inventory=%s price=%s not_found=%s skipped=%s",
-                inventory_changes,
-                price_changes,
-                not_found_count,
                 skipped_count,
             )
             logger.info(
-                "Compare found=%s not_found=%s inventory_changes=%s price_changes=%s",
-                found_count,
-                not_found_count,
+                "PLANNED CHANGES inventory=%s price=%s dry_run=%s",
                 inventory_changes,
                 price_changes,
+                settings.dry_run,
             )
+
+            if inventory_actions:
+                logger.info("SAMPLE INVENTORY CHANGES:")
+                for _, inventory_item_id, qty in inventory_actions[:MAX_SAMPLES]:
+                    logger.info(" - inventory_item_id=%s -> qty=%s", inventory_item_id, qty)
+
+            if price_actions:
+                logger.info("SAMPLE PRICE CHANGES:")
+                for _, variant_id, price in price_actions[:MAX_SAMPLES]:
+                    logger.info(" - variant_id=%s -> price=%s", variant_id, price)
 
             logger.info("Applying Shopify updates... dry_run=%s", settings.dry_run)
             if settings.dry_run:
