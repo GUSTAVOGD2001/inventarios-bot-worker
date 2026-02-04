@@ -24,6 +24,7 @@ class ShopifyVariant:
 class ShopifyVariantSnapshot:
     sku: str
     variant_id: str
+    product_id: str
     inventory_item_id: str
     price: float
     quantity: Optional[int]
@@ -169,6 +170,9 @@ class ShopifyClient:
                         id
                         sku
                         price
+                        product {
+                            id
+                        }
                         inventoryItem {
                             id
                             inventoryLevels(first: 10) {
@@ -198,6 +202,7 @@ class ShopifyClient:
             for node in nodes:
                 sku = normalize_sku(node.get("sku"))
                 variant_id = node.get("id")
+                product_id = (node.get("product") or {}).get("id")
                 inventory_item = node.get("inventoryItem") or {}
                 inventory_item_id = inventory_item.get("id")
                 inventory_levels = inventory_item.get("inventoryLevels", {}).get("edges", [])
@@ -222,7 +227,7 @@ class ShopifyClient:
                                 available = None
                             break
                 price_raw = node.get("price")
-                if not sku or not variant_id or not inventory_item_id:
+                if not sku or not variant_id or not product_id or not inventory_item_id:
                     continue
                 try:
                     price = float(price_raw)
@@ -233,6 +238,7 @@ class ShopifyClient:
                     ShopifyVariantSnapshot(
                         sku=sku,
                         variant_id=variant_id,
+                        product_id=product_id,
                         inventory_item_id=inventory_item_id,
                         price=price,
                         quantity=quantity,
@@ -266,19 +272,48 @@ class ShopifyClient:
             if data.get("data", {}).get("inventorySetOnHandQuantities", {}).get("userErrors"):
                 logger.warning("Inventory update userErrors: %s", data["data"]["inventorySetOnHandQuantities"]["userErrors"])
 
-    def update_prices(self, updates: List[Tuple[str, float]]) -> None:
-        batch_size = 25
-        for i in range(0, len(updates), batch_size):
-            batch = updates[i : i + batch_size]
-            mutation_parts = []
-            variables: Dict[str, dict] = {}
-            for idx, (variant_id, price) in enumerate(batch):
-                var_name = f"input{idx}"
-                mutation_parts.append(
-                    f"m{idx}: productVariantUpdate(input: ${var_name}) {{ userErrors {{ field message }} }}"
-                )
-                variables[var_name] = {"id": variant_id, "price": str(price)}
-            mutation = "mutation(" + ", ".join(f"${k}: ProductVariantInput!" for k in variables) + ") {" + " ".join(mutation_parts) + "}"
-            data = self._post_graphql(mutation, variables)
-            if data.get("errors"):
-                logger.warning("Price update errors: %s", json.dumps(data["errors"]))
+    def update_prices(self, updates: List[Tuple[str, str, float]]) -> None:
+        if not updates:
+            return
+        grouped: Dict[str, List[Tuple[str, float]]] = {}
+        for product_id, variant_id, price in updates:
+            grouped.setdefault(product_id, []).append((variant_id, price))
+        logger.info("Updating prices: products=%s variants=%s", len(grouped), len(updates))
+
+        mutation = """
+        mutation ProductVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+            productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                product {
+                    id
+                }
+                productVariants {
+                    id
+                    price
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        """
+        updated_count = 0
+        batch_size = 100
+        for product_id, variants in grouped.items():
+            for i in range(0, len(variants), batch_size):
+                batch = variants[i : i + batch_size]
+                variables = {
+                    "productId": product_id,
+                    "variants": [{"id": variant_id, "price": str(price)} for variant_id, price in batch],
+                }
+                data = self._post_graphql(mutation, variables)
+                if data.get("errors"):
+                    logger.warning("Price update errors: %s", json.dumps(data))
+                    raise RuntimeError("Shopify GraphQL errors while updating prices")
+                payload = data.get("data", {}).get("productVariantsBulkUpdate", {})
+                user_errors = payload.get("userErrors") or []
+                if user_errors:
+                    logger.warning("Price update errors: %s", json.dumps(user_errors))
+                    raise RuntimeError("Shopify userErrors while updating prices")
+                updated_count += len(batch)
+        logger.info("Price updates applied ok: %s variants", updated_count)

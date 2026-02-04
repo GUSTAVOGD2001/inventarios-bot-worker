@@ -83,7 +83,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             logger.info("DDVC map ready rows=%s", ddvc_rows)
 
             inventory_updates: List[Tuple[str, int]] = []
-            price_updates: List[Tuple[str, float]] = []
+            price_updates: List[Tuple[str, str, float]] = []
             inventory_actions: List[Tuple[int, str, int]] = []
             price_actions: List[Tuple[int, str, float]] = []
 
@@ -127,7 +127,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                             status="planned",
                         )
                         price_actions.append((action_id, shopify_item.variant_id, regular_price))
-                        price_updates.append((shopify_item.variant_id, regular_price))
+                        price_updates.append((shopify_item.product_id, shopify_item.variant_id, regular_price))
                         planned_action = True
                     if not planned_action:
                         skipped_count += 1
