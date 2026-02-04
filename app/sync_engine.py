@@ -186,6 +186,13 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
 
             inventory_changes = len(inventory_actions)
             price_changes = len(price_actions)
+            planned_to_zero = sum(
+                1 for _, _, _, qty_target in inventory_actions if qty_target == settings.out_of_stock_qty
+            )
+            planned_to_in_stock = sum(
+                1 for _, _, _, qty_target in inventory_actions if qty_target == settings.in_stock_qty
+            )
+            planned_price = len(price_actions)
 
             logger.info(
                 "COMPARE SUMMARY shopify=%s ddvc=%s found=%s not_found=%s skipped=%s",
@@ -199,6 +206,14 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 "PLANNED CHANGES inventory=%s price=%s dry_run=%s",
                 inventory_changes,
                 price_changes,
+                settings.dry_run,
+            )
+            logger.info(
+                "PLANNED TOTALS inventory_to_0=%s inventory_to_%s=%s price_changed=%s dry_run=%s",
+                planned_to_zero,
+                settings.in_stock_qty,
+                planned_to_in_stock,
+                planned_price,
                 settings.dry_run,
             )
 
@@ -217,6 +232,8 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 logger.info("DRY_RUN enabled. Skipping Shopify updates.")
             else:
                 logger.info("Applying updates...")
+                inventory_results: Dict[str, Optional[str]] = {}
+                price_results: Dict[str, Optional[str]] = {}
                 if inventory_updates:
                     try:
                         inventory_results = shopify.update_inventory(location_id, inventory_updates)
@@ -252,26 +269,24 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                             sku_status[sku_norm]["price_success"] = False
                         raise
 
-                for _, sku_norm, _, qty_target in inventory_actions:
-                    status = sku_status.get(sku_norm) or {}
-                    if status.get("inventory_needed") and status.get("inventory_success"):
-                        if qty_target == 0:
+                for _, _, inventory_item_id, qty_target in inventory_actions:
+                    if inventory_results.get(inventory_item_id) is None:
+                        if qty_target == settings.out_of_stock_qty:
                             applied_to_zero += 1
                         if qty_target == settings.in_stock_qty:
                             applied_to_in_stock += 1
 
-                for _, sku_norm, _, _ in price_actions:
-                    status = sku_status.get(sku_norm) or {}
-                    if status.get("price_needed") and status.get("price_success"):
+                for _, _, variant_id, _ in price_actions:
+                    if price_results.get(variant_id) is None:
                         applied_price_changes += 1
 
-            logger.info(
-                "APPLIED TOTALS inventory_to_0=%s inventory_to_%s=%s price_changed=%s",
-                applied_to_zero,
-                settings.in_stock_qty,
-                applied_to_in_stock,
-                applied_price_changes,
-            )
+                logger.info(
+                    "APPLIED TOTALS inventory_to_0=%s inventory_to_%s=%s price_changed=%s",
+                    applied_to_zero,
+                    settings.in_stock_qty,
+                    applied_to_in_stock,
+                    applied_price_changes,
+                )
 
             for sku_norm, desired in desired_state.items():
                 status = sku_status.get(sku_norm)
