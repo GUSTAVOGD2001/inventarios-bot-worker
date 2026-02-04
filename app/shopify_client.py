@@ -284,64 +284,50 @@ class ShopifyClient:
         results: Dict[str, Optional[str]] = {}
         if not updates:
             return results
-        quantity_field = self._resolve_inventory_quantity_field()
-        fallback_candidates = ["onHandQuantity", "availableQuantity", "quantity"]
         batch_size = 50
         for i in range(0, len(updates), batch_size):
             batch = updates[i : i + batch_size]
             for inventory_item_id, _ in batch:
                 results[inventory_item_id] = None
             mutation = """
-            mutation($input: InventorySetOnHandQuantitiesInput!) {
-                inventorySetOnHandQuantities(input: $input) {
+            mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+                inventorySetQuantities(input: $input) {
+                    inventoryAdjustmentGroup { id }
                     userErrors { field message }
                 }
             }
             """
-            candidates = [quantity_field] if quantity_field else fallback_candidates
-            attempted = 0
-            applied_field: Optional[str] = None
-            while candidates:
-                field_name = candidates.pop(0)
-                if field_name is None:
-                    continue
-                set_quantities = [
-                    {
-                        "inventoryItemId": inventory_item_id,
-                        "locationId": location_id,
-                        field_name: int(quantity),
-                    }
-                    for inventory_item_id, quantity in batch
-                ]
-                variables = {"input": {"reason": "correction", "setQuantities": set_quantities}}
-                data = self._post_graphql(mutation, variables)
-                errors = data.get("errors") or []
-                if errors:
-                    error_messages = " ".join(str(err.get("message", "")) for err in errors if isinstance(err, dict))
-                    invalid_argument = "argumentNotAccepted" in error_messages or "isn't defined" in error_messages
-                    if quantity_field is None and attempted == 0 and invalid_argument:
-                        attempted += 1
+            logger.info(
+                "Updating inventory via inventorySetQuantities (name=available) batch=%s",
+                len(batch),
+            )
+            quantities = [
+                {
+                    "inventoryItemId": inventory_item_id,
+                    "locationId": location_id,
+                    "quantity": int(quantity),
+                }
+                for inventory_item_id, quantity in batch
+            ]
+            variables = {"input": {"reason": "correction", "name": "available", "quantities": quantities}}
+            data = self._post_graphql(mutation, variables)
+            errors = data.get("errors") or []
+            if errors:
+                raise RuntimeError(f"Shopify GraphQL errors while updating inventory: {errors}")
+            payload = data.get("data", {}).get("inventorySetQuantities", {})
+            user_errors = payload.get("userErrors") or []
+            if user_errors:
+                logger.warning("Inventory update userErrors: %s", user_errors)
+                for error in user_errors:
+                    field = error.get("field") or []
+                    message = error.get("message") or "Unknown inventory error"
+                    index = next((int(item) for item in field if isinstance(item, int) or str(item).isdigit()), None)
+                    if index is None or index >= len(batch):
+                        for inventory_item_id, _ in batch:
+                            results[inventory_item_id] = message
                         continue
-                    raise RuntimeError(f"Shopify GraphQL errors while updating inventory: {errors}")
-                applied_field = field_name
-                payload = data.get("data", {}).get("inventorySetOnHandQuantities", {})
-                user_errors = payload.get("userErrors") or []
-                if user_errors:
-                    logger.warning("Inventory update userErrors: %s", user_errors)
-                    for error in user_errors:
-                        field = error.get("field") or []
-                        message = error.get("message") or "Unknown inventory error"
-                        index = next((int(item) for item in field if isinstance(item, int) or str(item).isdigit()), None)
-                        if index is None or index >= len(batch):
-                            for inventory_item_id, _ in batch:
-                                results[inventory_item_id] = message
-                            continue
-                        inventory_item_id = batch[index][0]
-                        results[inventory_item_id] = message
-                break
-            if applied_field and quantity_field is None:
-                self._inventory_quantity_field_name = applied_field
-                self._inventory_quantity_field_resolved = True
+                    inventory_item_id = batch[index][0]
+                    results[inventory_item_id] = message
         return results
 
     def update_prices(self, updates: List[Tuple[str, str, float]]) -> Dict[str, Optional[str]]:
