@@ -305,11 +305,18 @@ class ShopifyClient:
                 {
                     "inventoryItemId": inventory_item_id,
                     "locationId": location_id,
-                    "quantity": int(quantity),
+                    "quantity": int(quantity) if quantity is not None else 0,
                 }
                 for inventory_item_id, quantity in batch
             ]
-            variables = {"input": {"reason": "correction", "name": "available", "quantities": quantities}}
+            variables = {
+                "input": {
+                    "reason": "correction",
+                    "name": "available",
+                    "ignoreCompareQuantity": True,
+                    "quantities": quantities,
+                }
+            }
             data = self._post_graphql(mutation, variables)
             errors = data.get("errors") or []
             if errors:
@@ -321,6 +328,10 @@ class ShopifyClient:
                 for error in user_errors:
                     field = error.get("field") or []
                     message = error.get("message") or "Unknown inventory error"
+                    if field == ["input", "ignoreCompareQuantity"]:
+                        for inventory_item_id, _ in batch:
+                            results[inventory_item_id] = message
+                        continue
                     index = next((int(item) for item in field if isinstance(item, int) or str(item).isdigit()), None)
                     if index is None or index >= len(batch):
                         for inventory_item_id, _ in batch:
