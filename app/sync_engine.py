@@ -46,11 +46,6 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             db.set_kv(engine, "location_id", location_id)
             logger.info("Stored Shopify location id")
 
-        not_found_action = settings.not_found_action
-        if not_found_action not in {"skip", "out_of_stock"}:
-            logger.warning("Invalid NOT_FOUND_ACTION=%s, defaulting to skip", not_found_action)
-            not_found_action = "skip"
-
         error_message: Optional[str] = None
         found_count = 0
         not_found_count = 0
@@ -82,10 +77,13 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             ddvc_rows = len(ddvc_map)
             logger.info("DDVC map ready rows=%s", ddvc_rows)
 
+            sku_states = db.load_sku_states(engine)
             inventory_updates: List[Tuple[str, int]] = []
             price_updates: List[Tuple[str, str, float]] = []
-            inventory_actions: List[Tuple[int, str, int]] = []
-            price_actions: List[Tuple[int, str, float]] = []
+            inventory_actions: List[Tuple[int, str, str, int]] = []
+            price_actions: List[Tuple[int, str, str, float]] = []
+            sku_status: Dict[str, Dict[str, bool]] = {}
+            desired_state: Dict[str, Dict[str, Optional[float | bool | dt.datetime]]] = {}
 
             for sku_norm, shopify_item in shopify_map.items():
                 planned_action = False
@@ -93,60 +91,94 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 if ddvc_item:
                     found_count += 1
                     is_salable = ddvc_item.get("is_salable")
-                    regular_price = ddvc_item.get("regular_price")
-                    qty_target: Optional[int]
-                    if is_salable is True:
-                        qty_target = settings.in_stock_qty
-                    elif is_salable is False:
-                        qty_target = settings.out_of_stock_qty
+                    ddvc_price_raw = ddvc_item.get("final_price")
+                    ddvc_price: Optional[float]
+                    if ddvc_price_raw is None:
+                        ddvc_price = None
                     else:
-                        qty_target = None
-
-                    if qty_target is not None and shopify_item.quantity != qty_target:
-                        action_id = db.insert_sync_action(
-                            engine,
-                            run_id=run_id,
-                            sku_norm=sku_norm,
-                            action_type="inventory",
-                            old_value=_stringify(shopify_item.quantity),
-                            new_value=_stringify(qty_target),
-                            status="planned",
-                        )
-                        inventory_actions.append((action_id, shopify_item.inventory_item_id, qty_target))
-                        inventory_updates.append((shopify_item.inventory_item_id, qty_target))
-                        planned_action = True
-
-                    if regular_price is not None and abs(shopify_item.price - regular_price) > 0.01:
-                        action_id = db.insert_sync_action(
-                            engine,
-                            run_id=run_id,
-                            sku_norm=sku_norm,
-                            action_type="price",
-                            old_value=_stringify(shopify_item.price),
-                            new_value=_stringify(regular_price),
-                            status="planned",
-                        )
-                        price_actions.append((action_id, shopify_item.variant_id, regular_price))
-                        price_updates.append((shopify_item.product_id, shopify_item.variant_id, regular_price))
-                        planned_action = True
-                    if not planned_action:
-                        skipped_count += 1
+                        try:
+                            ddvc_price = float(ddvc_price_raw)
+                        except (TypeError, ValueError):
+                            ddvc_price = None
+                    qty_target = settings.in_stock_qty if is_salable is True else settings.out_of_stock_qty
+                    last_seen = dt.datetime.now(dt.timezone.utc)
                 else:
                     not_found_count += 1
-                    if not_found_action == "out_of_stock" and shopify_item.quantity != settings.out_of_stock_qty:
-                        action_id = db.insert_sync_action(
-                            engine,
-                            run_id=run_id,
-                            sku_norm=sku_norm,
-                            action_type="inventory",
-                            old_value=_stringify(shopify_item.quantity),
-                            new_value=_stringify(settings.out_of_stock_qty),
-                            status="planned",
-                        )
-                        inventory_actions.append((action_id, shopify_item.inventory_item_id, settings.out_of_stock_qty))
-                        inventory_updates.append((shopify_item.inventory_item_id, settings.out_of_stock_qty))
-                        planned_action = True
-                    if not planned_action:
+                    is_salable = None
+                    ddvc_price = None
+                    qty_target = settings.out_of_stock_qty
+                    last_seen = None
+
+                desired_state[sku_norm] = {
+                    "ddvc_salable": is_salable,
+                    "ddvc_price": ddvc_price,
+                    "target_qty": float(qty_target) if qty_target is not None else None,
+                    "last_seen_ddvc_at": last_seen,
+                }
+
+                prior_state = sku_states.get(sku_norm)
+                state_matches = (
+                    prior_state is not None
+                    and prior_state.ddvc_salable == is_salable
+                    and prior_state.ddvc_price == ddvc_price
+                    and prior_state.target_qty == desired_state[sku_norm]["target_qty"]
+                )
+                sku_status[sku_norm] = {
+                    "inventory_needed": False,
+                    "price_needed": False,
+                    "inventory_success": True,
+                    "price_success": True,
+                }
+
+                qty_needs_update = shopify_item.quantity != qty_target
+                if qty_needs_update:
+                    action_id = db.insert_sync_action(
+                        engine,
+                        run_id=run_id,
+                        sku_norm=sku_norm,
+                        action_type="inventory",
+                        old_value=_stringify(shopify_item.quantity),
+                        new_value=_stringify(qty_target),
+                        status="planned",
+                    )
+                    inventory_actions.append((action_id, sku_norm, shopify_item.inventory_item_id, qty_target))
+                    inventory_updates.append((shopify_item.inventory_item_id, qty_target))
+                    sku_status[sku_norm]["inventory_needed"] = True
+                    sku_status[sku_norm]["inventory_success"] = False
+                    logger.info(
+                        "SKU %s inventory %s -> %s",
+                        sku_norm,
+                        _stringify(shopify_item.quantity),
+                        _stringify(qty_target),
+                    )
+                    planned_action = True
+
+                if ddvc_price is not None and abs(shopify_item.price - ddvc_price) > 0.01:
+                    action_id = db.insert_sync_action(
+                        engine,
+                        run_id=run_id,
+                        sku_norm=sku_norm,
+                        action_type="price",
+                        old_value=_stringify(shopify_item.price),
+                        new_value=_stringify(ddvc_price),
+                        status="planned",
+                    )
+                    price_actions.append((action_id, sku_norm, shopify_item.variant_id, ddvc_price))
+                    price_updates.append((shopify_item.product_id, shopify_item.variant_id, ddvc_price))
+                    sku_status[sku_norm]["price_needed"] = True
+                    sku_status[sku_norm]["price_success"] = False
+                    logger.info(
+                        "SKU %s price %s -> %s",
+                        sku_norm,
+                        _stringify(shopify_item.price),
+                        _stringify(ddvc_price),
+                    )
+                    planned_action = True
+
+                if not planned_action:
+                    if state_matches and not qty_needs_update:
+                        skipped_count += 1
+                    else:
                         skipped_count += 1
 
             inventory_changes = len(inventory_actions)
@@ -169,12 +201,12 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
 
             if inventory_actions:
                 logger.info("SAMPLE INVENTORY CHANGES:")
-                for _, inventory_item_id, qty in inventory_actions[:MAX_SAMPLES]:
+                for _, _, inventory_item_id, qty in inventory_actions[:MAX_SAMPLES]:
                     logger.info(" - inventory_item_id=%s -> qty=%s", inventory_item_id, qty)
 
             if price_actions:
                 logger.info("SAMPLE PRICE CHANGES:")
-                for _, variant_id, price in price_actions[:MAX_SAMPLES]:
+                for _, _, variant_id, price in price_actions[:MAX_SAMPLES]:
                     logger.info(" - variant_id=%s -> price=%s", variant_id, price)
 
             logger.info("Applying Shopify updates... dry_run=%s", settings.dry_run)
@@ -184,24 +216,59 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 logger.info("Applying updates...")
                 if inventory_updates:
                     try:
-                        shopify.update_inventory(location_id, inventory_updates)
-                        for action_id, _, _ in inventory_actions:
-                            db.update_sync_action_status(engine, action_id, "applied")
+                        inventory_results = shopify.update_inventory(location_id, inventory_updates)
+                        for action_id, sku_norm, inventory_item_id, _ in inventory_actions:
+                            error = inventory_results.get(inventory_item_id)
+                            if error:
+                                db.update_sync_action_status(engine, action_id, "failed", error)
+                                sku_status[sku_norm]["inventory_success"] = False
+                            else:
+                                db.update_sync_action_status(engine, action_id, "applied")
+                                sku_status[sku_norm]["inventory_success"] = True
                     except Exception as exc:
                         error = str(exc)
-                        for action_id, _, _ in inventory_actions:
+                        for action_id, sku_norm, _, _ in inventory_actions:
                             db.update_sync_action_status(engine, action_id, "failed", error)
+                            sku_status[sku_norm]["inventory_success"] = False
                         raise
                 if price_updates:
                     try:
-                        shopify.update_prices(price_updates)
-                        for action_id, _, _ in price_actions:
-                            db.update_sync_action_status(engine, action_id, "applied")
+                        price_results = shopify.update_prices(price_updates)
+                        for action_id, sku_norm, variant_id, _ in price_actions:
+                            error = price_results.get(variant_id)
+                            if error:
+                                db.update_sync_action_status(engine, action_id, "failed", error)
+                                sku_status[sku_norm]["price_success"] = False
+                            else:
+                                db.update_sync_action_status(engine, action_id, "applied")
+                                sku_status[sku_norm]["price_success"] = True
                     except Exception as exc:
                         error = str(exc)
-                        for action_id, _, _ in price_actions:
+                        for action_id, sku_norm, _, _ in price_actions:
                             db.update_sync_action_status(engine, action_id, "failed", error)
+                            sku_status[sku_norm]["price_success"] = False
                         raise
+
+                for sku_norm, desired in desired_state.items():
+                    status = sku_status.get(sku_norm)
+                    if status and (
+                        (status["inventory_needed"] and not status["inventory_success"])
+                        or (status["price_needed"] and not status["price_success"])
+                    ):
+                        continue
+                    ddvc_salable = desired["ddvc_salable"]
+                    ddvc_price = desired["ddvc_price"]
+                    target_qty = desired["target_qty"]
+                    last_seen_ddvc_at = desired["last_seen_ddvc_at"]
+                    db.upsert_sku_state(
+                        engine,
+                        sku=sku_norm,
+                        ddvc_salable=ddvc_salable if isinstance(ddvc_salable, bool) or ddvc_salable is None else None,
+                        ddvc_price=ddvc_price if isinstance(ddvc_price, (float, int)) or ddvc_price is None else None,
+                        target_qty=target_qty if isinstance(target_qty, (float, int)) or target_qty is None else None,
+                        last_seen_ddvc_at=last_seen_ddvc_at if isinstance(last_seen_ddvc_at, dt.datetime) else None,
+                        last_sync_status="applied" if status and (status["inventory_needed"] or status["price_needed"]) else "noop",
+                    )
         except Exception as exc:
             error_message = str(exc)
             raise

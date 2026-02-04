@@ -16,7 +16,7 @@ class Settings:
     ddvc_page_size: int = 100
     ddvc_sleep_seconds: float = 0.35
     ddvc_timeout: float = 90.0
-    in_stock_qty: int = 99
+    in_stock_qty: int = 100
     out_of_stock_qty: int = 0
     not_found_action: str = "skip"
     dry_run: bool = True
@@ -86,7 +86,7 @@ def load_settings() -> Settings:
         ddvc_page_size=_get_env_int("DDVC_PAGE_SIZE", 100),
         ddvc_sleep_seconds=_get_env_float("DDVC_SLEEP_SECONDS", 0.35),
         ddvc_timeout=_get_env_float("DDVC_TIMEOUT", 90.0),
-        in_stock_qty=_get_env_int("IN_STOCK_QTY", 99),
+        in_stock_qty=_get_env_int("IN_STOCK_QTY", 100),
         out_of_stock_qty=_get_env_int("OUT_OF_STOCK_QTY", 0),
         not_found_action=os.getenv("NOT_FOUND_ACTION", "skip").strip().lower(),
         dry_run=_get_env_bool("DRY_RUN", True),
@@ -95,3 +95,10 @@ def load_settings() -> Settings:
         run_window_end=_get_env_time("RUN_WINDOW_END", time(18, 0)),
         run_interval_min=_get_env_int("RUN_INTERVAL_MIN", 15),
     )
+
+
+def validate_settings(settings: Settings) -> None:
+    if settings.in_stock_qty < 0 or settings.out_of_stock_qty < 0:
+        raise ValueError("IN_STOCK_QTY and OUT_OF_STOCK_QTY must be non-negative")
+    if settings.run_window_end <= settings.run_window_start:
+        raise ValueError("RUN_WINDOW_END must be after RUN_WINDOW_START")
