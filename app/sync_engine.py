@@ -54,6 +54,9 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
         price_changes = 0
         ddvc_rows = 0
         shopify_rows = 0
+        applied_to_zero = 0
+        applied_to_in_stock = 0
+        applied_price_changes = 0
         MAX_SAMPLES = 20
         run_inserted = False
 
@@ -249,26 +252,47 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                             sku_status[sku_norm]["price_success"] = False
                         raise
 
-                for sku_norm, desired in desired_state.items():
-                    status = sku_status.get(sku_norm)
-                    if status and (
-                        (status["inventory_needed"] and not status["inventory_success"])
-                        or (status["price_needed"] and not status["price_success"])
-                    ):
-                        continue
-                    ddvc_salable = desired["ddvc_salable"]
-                    ddvc_price = desired["ddvc_price"]
-                    target_qty = desired["target_qty"]
-                    last_seen_ddvc_at = desired["last_seen_ddvc_at"]
-                    db.upsert_sku_state(
-                        engine,
-                        sku=sku_norm,
-                        ddvc_salable=ddvc_salable if isinstance(ddvc_salable, bool) or ddvc_salable is None else None,
-                        ddvc_price=ddvc_price if isinstance(ddvc_price, (float, int)) or ddvc_price is None else None,
-                        target_qty=target_qty if isinstance(target_qty, (float, int)) or target_qty is None else None,
-                        last_seen_ddvc_at=last_seen_ddvc_at if isinstance(last_seen_ddvc_at, dt.datetime) else None,
-                        last_sync_status="applied" if status and (status["inventory_needed"] or status["price_needed"]) else "noop",
-                    )
+                for _, sku_norm, _, qty_target in inventory_actions:
+                    status = sku_status.get(sku_norm) or {}
+                    if status.get("inventory_needed") and status.get("inventory_success"):
+                        if qty_target == 0:
+                            applied_to_zero += 1
+                        if qty_target == settings.in_stock_qty:
+                            applied_to_in_stock += 1
+
+                for _, sku_norm, _, _ in price_actions:
+                    status = sku_status.get(sku_norm) or {}
+                    if status.get("price_needed") and status.get("price_success"):
+                        applied_price_changes += 1
+
+            logger.info(
+                "APPLIED TOTALS inventory_to_0=%s inventory_to_%s=%s price_changed=%s",
+                applied_to_zero,
+                settings.in_stock_qty,
+                applied_to_in_stock,
+                applied_price_changes,
+            )
+
+            for sku_norm, desired in desired_state.items():
+                status = sku_status.get(sku_norm)
+                if status and (
+                    (status["inventory_needed"] and not status["inventory_success"])
+                    or (status["price_needed"] and not status["price_success"])
+                ):
+                    continue
+                ddvc_salable = desired["ddvc_salable"]
+                ddvc_price = desired["ddvc_price"]
+                target_qty = desired["target_qty"]
+                last_seen_ddvc_at = desired["last_seen_ddvc_at"]
+                db.upsert_sku_state(
+                    engine,
+                    sku=sku_norm,
+                    ddvc_salable=ddvc_salable if isinstance(ddvc_salable, bool) or ddvc_salable is None else None,
+                    ddvc_price=ddvc_price if isinstance(ddvc_price, (float, int)) or ddvc_price is None else None,
+                    target_qty=target_qty if isinstance(target_qty, (float, int)) or target_qty is None else None,
+                    last_seen_ddvc_at=last_seen_ddvc_at if isinstance(last_seen_ddvc_at, dt.datetime) else None,
+                    last_sync_status="applied" if status and (status["inventory_needed"] or status["price_needed"]) else "noop",
+                )
         except Exception as exc:
             error_message = str(exc)
             raise
