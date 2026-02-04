@@ -250,10 +250,16 @@ class ShopifyClient:
             cursor = page_info.get("endCursor")
         return variants
 
-    def update_inventory(self, location_id: str, updates: List[Tuple[str, int]]) -> None:
+    def update_inventory(self, location_id: str, updates: List[Tuple[str, int]]) -> Dict[str, Optional[str]]:
+        results: Dict[str, Optional[str]] = {}
+        if not updates:
+            return results
+
         batch_size = 50
         for i in range(0, len(updates), batch_size):
             batch = updates[i : i + batch_size]
+            for inventory_item_id, _ in batch:
+                results[inventory_item_id] = None
             set_quantities = [
                 {
                     "inventoryItemId": inventory_item_id,
@@ -269,12 +275,28 @@ class ShopifyClient:
             }
             """
             data = self._post_graphql(mutation, {"locationId": location_id, "setQuantities": set_quantities})
-            if data.get("data", {}).get("inventorySetOnHandQuantities", {}).get("userErrors"):
-                logger.warning("Inventory update userErrors: %s", data["data"]["inventorySetOnHandQuantities"]["userErrors"])
+            if data.get("errors"):
+                raise RuntimeError(f"Shopify GraphQL errors while updating inventory: {data['errors']}")
+            payload = data.get("data", {}).get("inventorySetOnHandQuantities", {})
+            user_errors = payload.get("userErrors") or []
+            if user_errors:
+                logger.warning("Inventory update userErrors: %s", user_errors)
+                for error in user_errors:
+                    field = error.get("field") or []
+                    message = error.get("message") or "Unknown inventory error"
+                    index = next((int(item) for item in field if isinstance(item, int) or str(item).isdigit()), None)
+                    if index is None or index >= len(batch):
+                        for inventory_item_id, _ in batch:
+                            results[inventory_item_id] = message
+                        continue
+                    inventory_item_id = batch[index][0]
+                    results[inventory_item_id] = message
+        return results
 
-    def update_prices(self, updates: List[Tuple[str, str, float]]) -> None:
+    def update_prices(self, updates: List[Tuple[str, str, float]]) -> Dict[str, Optional[str]]:
+        results: Dict[str, Optional[str]] = {}
         if not updates:
-            return
+            return results
         grouped: Dict[str, List[Tuple[str, float]]] = {}
         for product_id, variant_id, price in updates:
             grouped.setdefault(product_id, []).append((variant_id, price))
@@ -302,6 +324,8 @@ class ShopifyClient:
         for product_id, variants in grouped.items():
             for i in range(0, len(variants), batch_size):
                 batch = variants[i : i + batch_size]
+                for variant_id, _ in batch:
+                    results[variant_id] = None
                 variables = {
                     "productId": product_id,
                     "variants": [{"id": variant_id, "price": str(price)} for variant_id, price in batch],
@@ -314,6 +338,16 @@ class ShopifyClient:
                 user_errors = payload.get("userErrors") or []
                 if user_errors:
                     logger.warning("Price update errors: %s", json.dumps(user_errors))
-                    raise RuntimeError("Shopify userErrors while updating prices")
+                    for error in user_errors:
+                        field = error.get("field") or []
+                        message = error.get("message") or "Unknown price error"
+                        index = next((int(item) for item in field if isinstance(item, int) or str(item).isdigit()), None)
+                        if index is None or index >= len(batch):
+                            for variant_id, _ in batch:
+                                results[variant_id] = message
+                            continue
+                        variant_id = batch[index][0]
+                        results[variant_id] = message
                 updated_count += len(batch)
         logger.info("Price updates applied ok: %s variants", updated_count)
+        return results

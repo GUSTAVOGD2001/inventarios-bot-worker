@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app.config import Settings, load_settings
+from app.config import Settings, load_settings, validate_settings
 from app.db import ensure_schema, get_engine, get_kv, init_db, set_kv
 from app.logging_setup import set_run_id, setup_logging
 from app.shopify_client import ShopifyClient
@@ -55,6 +55,7 @@ def seconds_until_next_slot(now_local: datetime, settings: Settings) -> int:
 
 def main() -> None:
     settings = load_settings()
+    validate_settings(settings)
     run_id = uuid.uuid4().hex[:8]
     run_filter = setup_logging(run_id)
     tz = ZoneInfo(settings.tz)
