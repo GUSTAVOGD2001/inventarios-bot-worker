@@ -76,8 +76,30 @@ def main() -> None:
             run_id = uuid.uuid4().hex[:8]
             set_run_id(run_filter, run_id)
             now_local = datetime.now(tz)
+
+            # Check for manual sync trigger from panel API
+            trigger_sync = get_kv(engine, "trigger_sync")
+            manual_triggered = False
+            if trigger_sync:
+                import json as _json
+                try:
+                    trigger_data = _json.loads(trigger_sync)
+                    requested_at = trigger_data.get("requested_at", "")
+                    logger.info("Manual sync trigger detected, requested_at=%s", requested_at)
+                    manual_triggered = True
+                    # Clear the trigger
+                    set_kv(engine, "trigger_sync", "")
+                except (ValueError, TypeError):
+                    set_kv(engine, "trigger_sync", "")
+
             should_run, slot_id = should_run_now(now_local, settings)
-            if should_run:
+            if manual_triggered:
+                logger.info("Running manual sync triggered from panel")
+                try:
+                    run_sync_once(settings, engine, shopify, run_id)
+                except Exception:
+                    logger.exception("Manual sync run failed")
+            elif should_run:
                 last_slot = get_kv(engine, LAST_RUN_SLOT_KEY)
                 if last_slot != slot_id:
                     set_kv(engine, LAST_RUN_SLOT_KEY, slot_id)
