@@ -4,11 +4,13 @@ import datetime as dt
 import logging
 from typing import Dict, List, Optional, Tuple
 
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app import db
 from app.config import Settings
 from app.ddvc_full import fetch_ddvc_full
+from app.pricing import PricingEngine, log_price_change
 from app.shopify_client import ShopifyClient, ShopifyVariantSnapshot
 from app.sku_utils import normalize_sku
 
@@ -79,6 +81,10 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             ddvc_map = fetch_ddvc_full(graphql_url=settings.ddvc_graphql)
             ddvc_rows = len(ddvc_map)
             logger.info("DDVC map ready rows=%s", ddvc_rows)
+
+            # Load pricing rules from panel
+            pricing_engine = PricingEngine(engine)
+            pricing_engine.load_rules()
 
             sku_states = db.load_sku_states(engine)
             inventory_updates: List[Tuple[str, int]] = []
@@ -156,27 +162,44 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     )
                     planned_action = True
 
-                if ddvc_price is not None and abs(shopify_item.price - ddvc_price) > 0.01:
-                    action_id = db.insert_sync_action(
-                        engine,
-                        run_id=run_id,
-                        sku_norm=sku_norm,
-                        action_type="price",
-                        old_value=_stringify(shopify_item.price),
-                        new_value=_stringify(ddvc_price),
-                        status="planned",
-                    )
-                    price_actions.append((action_id, sku_norm, shopify_item.variant_id, ddvc_price))
-                    price_updates.append((shopify_item.product_id, shopify_item.variant_id, ddvc_price))
-                    sku_status[sku_norm]["price_needed"] = True
-                    sku_status[sku_norm]["price_success"] = False
-                    logger.info(
-                        "SKU %s price %s -> %s",
-                        sku_norm,
-                        _stringify(shopify_item.price),
-                        _stringify(ddvc_price),
-                    )
-                    planned_action = True
+                if ddvc_price is not None:
+                    price_result = pricing_engine.calculate(sku_norm, ddvc_price)
+                    target_price = price_result.final_price
+
+                    if abs(shopify_item.price - target_price) > 0.01:
+                        rule_desc = " + ".join(price_result.steps[1:]) if len(price_result.steps) > 1 else "Sin regla"
+                        action_id = db.insert_sync_action(
+                            engine,
+                            run_id=run_id,
+                            sku_norm=sku_norm,
+                            action_type="price",
+                            old_value=_stringify(shopify_item.price),
+                            new_value=_stringify(target_price),
+                            status="planned",
+                        )
+                        price_actions.append((action_id, sku_norm, shopify_item.variant_id, target_price))
+                        price_updates.append((shopify_item.product_id, shopify_item.variant_id, target_price))
+                        sku_status[sku_norm]["price_needed"] = True
+                        sku_status[sku_norm]["price_success"] = False
+                        logger.info(
+                            "SKU %s price %s -> %s (ddvc=%s, steps: %s)",
+                            sku_norm,
+                            _stringify(shopify_item.price),
+                            _stringify(target_price),
+                            _stringify(ddvc_price),
+                            " | ".join(price_result.steps),
+                        )
+                        # Log to price_change_log for the panel
+                        log_price_change(
+                            engine,
+                            sku=sku_norm,
+                            ddvc_price=ddvc_price,
+                            rule_applied=rule_desc,
+                            price_before=shopify_item.price,
+                            price_after=target_price,
+                            was_applied=False,  # Se marca True después de aplicar
+                        )
+                        planned_action = True
 
                 if not planned_action:
                     if state_matches and not qty_needs_update:
@@ -279,6 +302,24 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 for _, _, variant_id, _ in price_actions:
                     if price_results.get(variant_id) is None:
                         applied_price_changes += 1
+
+                # Mark price changes as applied in price_change_log
+                for _, sku_norm, variant_id, target_price in price_actions:
+                    if price_results.get(variant_id) is None:
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(
+                                    text(
+                                        """UPDATE price_change_log
+                                           SET was_applied = true
+                                           WHERE sku = :sku AND price_after = :price_after
+                                             AND was_applied = false
+                                             AND created_at >= NOW() - INTERVAL '1 hour'"""
+                                    ),
+                                    {"sku": sku_norm, "price_after": target_price},
+                                )
+                        except Exception:
+                            logger.warning("Failed to mark price_change_log as applied for %s", sku_norm)
 
                 logger.info(
                     "APPLIED TOTALS inventory_to_0=%s inventory_to_%s=%s price_changed=%s",
