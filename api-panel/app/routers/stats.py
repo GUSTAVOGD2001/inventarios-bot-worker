@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends
 
@@ -40,7 +40,7 @@ async def stats_summary():
         "SELECT COUNT(*) FROM sku_state WHERE ddvc_salable = false"
     )
 
-    today_start = datetime.combine(date.today(), datetime.min.time(), tzinfo=timezone.utc)
+    today_start = datetime.combine(date.today(), datetime.min.time())
     changes_today = await pool.fetchval(
         "SELECT COUNT(*) FROM sync_actions WHERE created_at >= $1",
         today_start,

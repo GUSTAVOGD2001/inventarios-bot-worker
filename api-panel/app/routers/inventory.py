@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 
@@ -20,7 +20,7 @@ async def inventory_changes(
     if since:
         since_dt = datetime.fromisoformat(since)
     else:
-        since_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+        since_dt = datetime.now() - timedelta(hours=24)
 
     conditions = ["sa.action_type = 'inventory'", "sa.created_at >= $1"]
     params: list = [since_dt]
