@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 
@@ -20,7 +20,7 @@ async def price_changes(
     if since:
         since_dt = datetime.fromisoformat(since)
     else:
-        since_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+        since_dt = datetime.now() - timedelta(hours=24)
 
     count_sql = """
         SELECT COUNT(*) FROM price_change_log pcl
