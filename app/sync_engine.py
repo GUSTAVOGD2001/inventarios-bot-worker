@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -65,6 +66,14 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
         try:
             db.insert_sync_run(engine, run_id, start, start, settings.dry_run)
             run_inserted = True
+            db.set_kv(engine, "sync_progress", json.dumps({
+                "run_id": run_id,
+                "phase": "shopify_fetch",
+                "message": "Obteniendo productos de Shopify...",
+                "percent": 5,
+                "started_at": start.isoformat(),
+                "details": {}
+            }))
             snapshot = shopify.fetch_variant_snapshot(location_id)
             shopify_rows = len(snapshot)
             logger.info("Shopify snapshot rows=%s", shopify_rows)
@@ -78,13 +87,40 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 logger.warning("No SKUs in Shopify snapshot; skipping sync")
                 return
 
+            db.set_kv(engine, "sync_progress", json.dumps({
+                "run_id": run_id,
+                "phase": "ddvc_fetch",
+                "message": f"Shopify listo ({len(shopify_map)} productos). Consultando DDVC...",
+                "percent": 15,
+                "started_at": start.isoformat(),
+                "details": {"shopify_rows": len(shopify_map)}
+            }))
+
             ddvc_map = fetch_ddvc_full(graphql_url=settings.ddvc_graphql)
             ddvc_rows = len(ddvc_map)
             logger.info("DDVC map ready rows=%s", ddvc_rows)
 
+            db.set_kv(engine, "sync_progress", json.dumps({
+                "run_id": run_id,
+                "phase": "comparing",
+                "message": f"DDVC listo ({ddvc_rows} productos). Comparando inventarios...",
+                "percent": 40,
+                "started_at": start.isoformat(),
+                "details": {"shopify_rows": len(shopify_map), "ddvc_rows": ddvc_rows}
+            }))
+
             # Load pricing rules from panel
             pricing_engine = PricingEngine(engine)
             pricing_engine.load_rules()
+
+            db.set_kv(engine, "sync_progress", json.dumps({
+                "run_id": run_id,
+                "phase": "pricing",
+                "message": "Reglas de precios cargadas. Calculando precios y comparando...",
+                "percent": 45,
+                "started_at": start.isoformat(),
+                "details": {"shopify_rows": len(shopify_map), "ddvc_rows": ddvc_rows}
+            }))
 
             sku_states = db.load_sku_states(engine)
             inventory_updates: List[Tuple[str, int]] = []
@@ -240,6 +276,22 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 settings.dry_run,
             )
 
+            db.set_kv(engine, "sync_progress", json.dumps({
+                "run_id": run_id,
+                "phase": "applying",
+                "message": f"Aplicando {inventory_changes} cambios inventario, {price_changes} cambios precio...",
+                "percent": 70,
+                "started_at": start.isoformat(),
+                "details": {
+                    "shopify_rows": len(shopify_map),
+                    "ddvc_rows": ddvc_rows,
+                    "found": found_count,
+                    "not_found": not_found_count,
+                    "inventory_changes": inventory_changes,
+                    "price_changes": price_changes
+                }
+            }))
+
             if inventory_actions:
                 logger.info("SAMPLE INVENTORY CHANGES:")
                 for _, _, inventory_item_id, qty in inventory_actions[:MAX_SAMPLES]:
@@ -329,6 +381,25 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     applied_price_changes,
                 )
 
+                db.set_kv(engine, "sync_progress", json.dumps({
+                    "run_id": run_id,
+                    "phase": "saving",
+                    "message": "Cambios aplicados en Shopify. Guardando estados en BD...",
+                    "percent": 90,
+                    "started_at": start.isoformat(),
+                    "details": {
+                        "shopify_rows": len(shopify_map),
+                        "ddvc_rows": ddvc_rows,
+                        "found": found_count,
+                        "not_found": not_found_count,
+                        "inventory_changes": inventory_changes,
+                        "price_changes": price_changes,
+                        "applied_to_zero": applied_to_zero,
+                        "applied_to_in_stock": applied_to_in_stock,
+                        "applied_price_changes": applied_price_changes
+                    }
+                }))
+
             for sku_norm, desired in desired_state.items():
                 status = sku_status.get(sku_norm)
                 if status and (
@@ -367,6 +438,19 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     shopify_rows=shopify_rows,
                     error=error_message,
                 )
+            db.set_kv(engine, "sync_progress", json.dumps({
+                "run_id": run_id,
+                "phase": "done",
+                "message": "Sincronización completada.",
+                "percent": 100,
+                "started_at": start.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "details": {
+                    "shopify_rows": shopify_rows,
+                    "ddvc_rows": ddvc_rows,
+                    "error": error_message
+                }
+            }))
             db.release_lock(lock_conn)
 
     duration = (dt.datetime.now(dt.timezone.utc) - start).total_seconds()
