@@ -104,3 +104,31 @@ async def worker_history(
     )
     items = [dict(r) for r in rows]
     return {"total": total, "page": page, "per_page": per_page, "items": items}
+
+
+@router.get("/worker/progress")
+async def worker_progress():
+    """Retorna el progreso actual del sync para el monitor en vivo."""
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT value FROM app_kv WHERE key = 'sync_progress'")
+    if not row or not row["value"]:
+        return {
+            "run_id": None,
+            "phase": "idle",
+            "message": "No hay sincronización en curso",
+            "percent": 0,
+            "details": {}
+        }
+    try:
+        val = row["value"]
+        if isinstance(val, str):
+            return json.loads(val)
+        return val
+    except (json.JSONDecodeError, TypeError):
+        return {
+            "run_id": None,
+            "phase": "idle",
+            "message": "No hay sincronización en curso",
+            "percent": 0,
+            "details": {}
+        }
