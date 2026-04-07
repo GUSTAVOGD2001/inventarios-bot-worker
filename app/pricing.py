@@ -262,3 +262,23 @@ def log_price_change(
             )
     except Exception:
         logger.warning("Failed to log price change for SKU %s", sku, exc_info=True)
+
+
+def load_sku_exemptions(engine: Engine) -> Dict[str, dict]:
+    """Carga todas las exenciones indexadas por SKU normalizado.
+    Si la tabla no existe (panel no instalado), retorna dict vacío."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT sku, exempt_inventory, exempt_price FROM sku_exemptions")
+            ).fetchall()
+        return {
+            row[0].strip().upper(): {
+                "exempt_inventory": bool(row[1]),
+                "exempt_price": bool(row[2]),
+            }
+            for row in rows
+        }
+    except Exception:
+        logger.warning("Could not load sku_exemptions table, ignoring")
+        return {}

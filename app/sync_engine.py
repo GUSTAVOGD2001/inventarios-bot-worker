@@ -11,7 +11,7 @@ from sqlalchemy.engine import Engine
 from app import db
 from app.config import Settings
 from app.ddvc_full import fetch_ddvc_full
-from app.pricing import PricingEngine, log_price_change
+from app.pricing import PricingEngine, load_sku_exemptions, log_price_change
 from app.shopify_client import ShopifyClient, ShopifyVariantSnapshot
 from app.sku_utils import normalize_sku
 
@@ -113,6 +113,11 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             pricing_engine = PricingEngine(engine)
             pricing_engine.load_rules()
 
+            # Load SKU exemptions from panel
+            sku_exemptions = load_sku_exemptions(engine)
+            if sku_exemptions:
+                logger.info("Loaded %s SKU exemptions from panel", len(sku_exemptions))
+
             db.set_kv(engine, "sync_progress", json.dumps({
                 "run_id": run_id,
                 "phase": "pricing",
@@ -132,6 +137,16 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
 
             for sku_norm, shopify_item in shopify_map.items():
                 planned_action = False
+
+                # Check exemptions for this SKU
+                exemption = sku_exemptions.get(sku_norm, {})
+                exempt_inventory = exemption.get("exempt_inventory", False)
+                exempt_price = exemption.get("exempt_price", False)
+                if exempt_inventory and exempt_price:
+                    skipped_count += 1
+                    logger.debug("SKU %s fully exempted, skipping", sku_norm)
+                    continue
+
                 ddvc_item = ddvc_map.get(sku_norm)
                 if ddvc_item:
                     found_count += 1
@@ -176,7 +191,14 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 }
 
                 qty_needs_update = shopify_item.quantity != qty_target
-                if qty_needs_update:
+                if qty_needs_update and exempt_inventory:
+                    logger.info(
+                        "SKU %s inventory exempt, would have changed %s -> %s but skipping",
+                        sku_norm,
+                        _stringify(shopify_item.quantity),
+                        _stringify(qty_target),
+                    )
+                if qty_needs_update and not exempt_inventory:
                     action_id = db.insert_sync_action(
                         engine,
                         run_id=run_id,
@@ -198,7 +220,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     )
                     planned_action = True
 
-                if ddvc_price is not None:
+                if ddvc_price is not None and not exempt_price:
                     price_result = pricing_engine.calculate(sku_norm, ddvc_price)
                     target_price = price_result.final_price
 
@@ -236,6 +258,8 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                             was_applied=False,  # Se marca True después de aplicar
                         )
                         planned_action = True
+                elif ddvc_price is not None and exempt_price:
+                    logger.debug("SKU %s price exempt, keeping current price", sku_norm)
 
                 if not planned_action:
                     if state_matches and not qty_needs_update:
