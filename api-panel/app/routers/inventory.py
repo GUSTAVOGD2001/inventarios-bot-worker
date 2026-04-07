@@ -52,9 +52,9 @@ async def inventory_changes(
     query_sql = f"""
         SELECT sa.id, sa.run_id, sa.sku_norm as sku, sa.action_type,
                sa.old_value, sa.new_value, sa.status, sa.error, sa.created_at,
-               COALESCE(sv.title, 'Sin título') as title, sv.variant_id
+               'Sin título' as title, sv.variant_id
         FROM sync_actions sa
-        LEFT JOIN shopify_variants sv ON UPPER(sv.sku) = UPPER(sa.sku_norm)
+        LEFT JOIN shopify_variants sv ON sv.sku = sa.sku_norm
         WHERE {where}
         ORDER BY sa.created_at DESC
         LIMIT ${idx} OFFSET ${idx + 1}

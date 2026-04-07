@@ -20,18 +20,18 @@ async def stats_summary():
 
     matched = await pool.fetchval(
         """SELECT COUNT(*) FROM shopify_variants sv
-           INNER JOIN sku_state ss ON UPPER(sv.sku) = UPPER(ss.sku)"""
+           INNER JOIN sku_state ss ON sv.sku = ss.sku"""
     )
 
     ddvc_only = await pool.fetchval(
         """SELECT COUNT(*) FROM sku_state ss
-           LEFT JOIN shopify_variants sv ON UPPER(sv.sku) = UPPER(ss.sku)
+           LEFT JOIN shopify_variants sv ON sv.sku = ss.sku
            WHERE sv.sku IS NULL"""
     )
 
     shopify_only = await pool.fetchval(
         """SELECT COUNT(*) FROM shopify_variants sv
-           LEFT JOIN sku_state ss ON UPPER(ss.sku) = UPPER(sv.sku)
+           LEFT JOIN sku_state ss ON ss.sku = sv.sku
            WHERE ss.sku IS NULL"""
     )
 

@@ -21,14 +21,14 @@ async def sku_mismatches(
     if type == "ddvc_only":
         count_sql = """
             SELECT COUNT(*) FROM sku_state ss
-            LEFT JOIN shopify_variants sv ON UPPER(sv.sku) = UPPER(ss.sku)
+            LEFT JOIN shopify_variants sv ON sv.sku = ss.sku
             WHERE sv.sku IS NULL
         """
         query_sql = """
             SELECT ss.sku, 'ddvc_only' as mismatch_type,
                    ss.ddvc_salable, ss.ddvc_price, ss.updated_at
             FROM sku_state ss
-            LEFT JOIN shopify_variants sv ON UPPER(sv.sku) = UPPER(ss.sku)
+            LEFT JOIN shopify_variants sv ON sv.sku = ss.sku
             WHERE sv.sku IS NULL
             ORDER BY ss.sku
             LIMIT $1 OFFSET $2
@@ -38,14 +38,14 @@ async def sku_mismatches(
     elif type == "shopify_only":
         count_sql = """
             SELECT COUNT(*) FROM shopify_variants sv
-            LEFT JOIN sku_state ss ON UPPER(ss.sku) = UPPER(sv.sku)
+            LEFT JOIN sku_state ss ON ss.sku = sv.sku
             WHERE ss.sku IS NULL
         """
         query_sql = """
             SELECT sv.sku, 'shopify_only' as mismatch_type,
                    sv.variant_id, sv.inventory_item_id, sv.updated_at
             FROM shopify_variants sv
-            LEFT JOIN sku_state ss ON UPPER(ss.sku) = UPPER(sv.sku)
+            LEFT JOIN sku_state ss ON ss.sku = sv.sku
             WHERE ss.sku IS NULL
             ORDER BY sv.sku
             LIMIT $1 OFFSET $2
@@ -56,11 +56,11 @@ async def sku_mismatches(
         count_sql = """
             SELECT (
                 SELECT COUNT(*) FROM sku_state ss
-                LEFT JOIN shopify_variants sv ON UPPER(sv.sku) = UPPER(ss.sku)
+                LEFT JOIN shopify_variants sv ON sv.sku = ss.sku
                 WHERE sv.sku IS NULL
             ) + (
                 SELECT COUNT(*) FROM shopify_variants sv
-                LEFT JOIN sku_state ss ON UPPER(ss.sku) = UPPER(sv.sku)
+                LEFT JOIN sku_state ss ON ss.sku = sv.sku
                 WHERE ss.sku IS NULL
             )
         """
@@ -68,12 +68,12 @@ async def sku_mismatches(
             SELECT sku, mismatch_type, updated_at FROM (
                 SELECT ss.sku, 'ddvc_only' as mismatch_type, ss.updated_at
                 FROM sku_state ss
-                LEFT JOIN shopify_variants sv ON UPPER(sv.sku) = UPPER(ss.sku)
+                LEFT JOIN shopify_variants sv ON sv.sku = ss.sku
                 WHERE sv.sku IS NULL
                 UNION ALL
                 SELECT sv.sku, 'shopify_only' as mismatch_type, sv.updated_at
                 FROM shopify_variants sv
-                LEFT JOIN sku_state ss ON UPPER(ss.sku) = UPPER(sv.sku)
+                LEFT JOIN sku_state ss ON ss.sku = sv.sku
                 WHERE ss.sku IS NULL
             ) combined
             ORDER BY sku
@@ -101,9 +101,8 @@ async def sku_search(
         SELECT COUNT(*) FROM (
             SELECT COALESCE(ss.sku, sv.sku) AS sku
             FROM sku_state ss
-            FULL OUTER JOIN shopify_variants sv ON UPPER(sv.sku) = UPPER(ss.sku)
+            FULL OUTER JOIN shopify_variants sv ON sv.sku = ss.sku
             WHERE COALESCE(ss.sku, sv.sku) ILIKE $1
-               OR sv.title ILIKE $1
         ) sub
     """
     total = await pool.fetchval(count_sql, pattern)
@@ -111,7 +110,7 @@ async def sku_search(
     query_sql = """
         SELECT
             COALESCE(ss.sku, sv.sku) AS sku,
-            COALESCE(sv.title, 'Sin título') AS title,
+            'Sin título' AS title,
             sv.variant_id,
             sv.inventory_item_id,
             ss.ddvc_salable,
@@ -119,9 +118,8 @@ async def sku_search(
             ss.target_qty,
             COALESCE(ss.updated_at, sv.updated_at) AS updated_at
         FROM sku_state ss
-        FULL OUTER JOIN shopify_variants sv ON UPPER(sv.sku) = UPPER(ss.sku)
+        FULL OUTER JOIN shopify_variants sv ON sv.sku = ss.sku
         WHERE COALESCE(ss.sku, sv.sku) ILIKE $1
-           OR sv.title ILIKE $1
         ORDER BY COALESCE(ss.sku, sv.sku)
         LIMIT $2 OFFSET $3
     """
@@ -139,7 +137,7 @@ async def sku_analysis(sku: str):
 
     # Shopify data
     shopify = await pool.fetchrow(
-        "SELECT * FROM shopify_variants WHERE UPPER(sku) = $1", sku_norm
+        "SELECT * FROM shopify_variants WHERE sku = $1", sku_norm
     )
     # DDVC data
     ddvc = await pool.fetchrow(
@@ -165,7 +163,7 @@ async def sku_analysis(sku: str):
     # History: last 20 price_change_log
     price_log = await pool.fetch(
         """SELECT id, ddvc_price, rule_applied, price_before, price_after, was_applied, created_at
-           FROM price_change_log WHERE UPPER(sku) = $1
+           FROM price_change_log WHERE sku = $1
            ORDER BY created_at DESC LIMIT 20""",
         sku_norm,
     )

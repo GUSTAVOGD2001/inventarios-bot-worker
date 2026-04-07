@@ -43,9 +43,9 @@ async def price_changes(
     query_sql = """
         SELECT pcl.id, pcl.sku, pcl.ddvc_price, pcl.rule_applied,
                pcl.price_before, pcl.price_after, pcl.was_applied, pcl.created_at,
-               COALESCE(sv.title, 'Sin título') as title, sv.variant_id
+               'Sin título' as title, sv.variant_id
         FROM price_change_log pcl
-        LEFT JOIN shopify_variants sv ON UPPER(sv.sku) = UPPER(pcl.sku)
+        LEFT JOIN shopify_variants sv ON sv.sku = pcl.sku
         WHERE pcl.created_at >= $1
           AND ABS(COALESCE(pcl.price_after, 0) - COALESCE(pcl.price_before, 0)) >= $2
         ORDER BY pcl.created_at DESC
