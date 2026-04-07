@@ -37,6 +37,27 @@ def round_up_x9_99(price: float) -> float:
     return round(target, 2)
 
 
+def round_nearest_99_cents(price: float) -> float:
+    """Cambia los centavos al .99 del entero más cercano.
+    57.30 → 57.99, 58.40 → 58.99, 142.30 → 142.99
+    """
+    if price < 1:
+        return 0.99
+    nearest_int = round(price)
+    return round(nearest_int - 0.01, 2) if nearest_int > 0 else 0.99
+
+
+def apply_rounding(price: float, threshold: float, low_mode: str, high_mode: str) -> tuple[float, str]:
+    """Aplica el redondeo según el rango del precio."""
+    mode = low_mode if price < threshold else high_mode
+    if mode == "nearest_99":
+        return round_nearest_99_cents(price), "nearest_99"
+    elif mode == "ceil_x9_99":
+        return round_up_x9_99(price), "ceil_x9_99"
+    else:
+        return round(price, 2), "none"
+
+
 def _get_setting(engine: Engine, key: str):
     """Lee un valor de panel_settings."""
     with engine.connect() as conn:
@@ -86,6 +107,9 @@ class PricingEngine:
         self.overrides: Dict[str, dict] = {}
         self.global_rule: Optional[dict] = None
         self.rounding_enabled: bool = False
+        self.rounding_threshold: float = 200.0
+        self.rounding_low_mode: str = "nearest_99"
+        self.rounding_high_mode: str = "ceil_x9_99"
         self.global_markup_enabled: bool = True
 
     def load_rules(self) -> None:
@@ -94,12 +118,18 @@ class PricingEngine:
             self.overrides = _load_overrides(self.engine)
             self.global_rule = _load_global_rule(self.engine)
             self.rounding_enabled = bool(_get_setting(self.engine, "rounding_enabled"))
+            self.rounding_threshold = float(_get_setting(self.engine, "rounding_threshold") or 200)
+            self.rounding_low_mode = _get_setting(self.engine, "rounding_low_mode") or "nearest_99"
+            self.rounding_high_mode = _get_setting(self.engine, "rounding_high_mode") or "ceil_x9_99"
             self.global_markup_enabled = bool(_get_setting(self.engine, "global_markup_enabled"))
             logger.info(
-                "Pricing rules loaded: overrides=%s global_rule=%s rounding=%s markup_enabled=%s",
+                "Pricing rules loaded: overrides=%s global_rule=%s rounding=%s threshold=%s low=%s high=%s markup_enabled=%s",
                 len(self.overrides),
                 self.global_rule["name"] if self.global_rule else "none",
                 self.rounding_enabled,
+                self.rounding_threshold,
+                self.rounding_low_mode,
+                self.rounding_high_mode,
                 self.global_markup_enabled,
             )
         except Exception:
@@ -107,6 +137,9 @@ class PricingEngine:
             self.overrides = {}
             self.global_rule = None
             self.rounding_enabled = False
+            self.rounding_threshold = 200.0
+            self.rounding_low_mode = "nearest_99"
+            self.rounding_high_mode = "ceil_x9_99"
             self.global_markup_enabled = True
 
     def calculate(self, sku_norm: str, ddvc_price: float) -> PriceResult:
@@ -169,12 +202,19 @@ class PricingEngine:
                     global_rule_applied = f"{rname} +${rval:.2f}"
                     steps.append(f"{rname} +${rval:.2f}: ${price:.2f}")
 
-        # Step 3: Rounding
+        # Step 3: Rounding por rango
         if self.rounding_enabled:
-            rounded = round_up_x9_99(price)
+            rounded, mode_used = apply_rounding(
+                price,
+                self.rounding_threshold,
+                self.rounding_low_mode,
+                self.rounding_high_mode,
+            )
             if rounded != round(price, 2):
                 rounding_applied = True
-                steps.append(f"Redondeo X9.99: ${rounded:.2f}")
+                mode_label = "al .99 más cercano" if mode_used == "nearest_99" else "X9.99"
+                range_label = "<" if price < self.rounding_threshold else "≥"
+                steps.append(f"Redondeo {mode_label} (rango {range_label}${self.rounding_threshold:.0f}): ${rounded:.2f}")
             price = rounded
 
         final_price = round(price, 2)

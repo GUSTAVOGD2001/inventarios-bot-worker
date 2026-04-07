@@ -3,7 +3,7 @@ import logging
 
 import asyncpg
 
-from .rounding import round_up_x9_99
+from .rounding import apply_rounding
 
 logger = logging.getLogger(__name__)
 
@@ -111,11 +111,21 @@ async def calculate_final_price(
             do_round = False
 
     if do_round:
-        rounded = round_up_x9_99(price)
-        if rounded != round(price, 2):
+        # Leer configuración de redondeo por rango
+        threshold_val = await _get_setting(pool, "rounding_threshold")
+        low_mode_val = await _get_setting(pool, "rounding_low_mode")
+        high_mode_val = await _get_setting(pool, "rounding_high_mode")
+
+        threshold = float(threshold_val) if threshold_val is not None else 200.0
+        low_mode = low_mode_val if low_mode_val else "nearest_99"
+        high_mode = high_mode_val if high_mode_val else "ceil_x9_99"
+
+        rounded_price, mode_used = apply_rounding(price, threshold, low_mode, high_mode)
+        if rounded_price != round(price, 2):
             rounding_applied = True
-            steps.append(f"Redondeo X9.99: ${rounded:.2f}")
-        price = rounded
+            mode_label = "al .99 más cercano" if mode_used == "nearest_99" else "X9.99"
+            steps.append(f"Redondeo {mode_label} (rango {'<' if price < threshold else '≥'}${threshold:.0f}): ${rounded_price:.2f}")
+        price = rounded_price
 
     final_price = round(price, 2)
     margin_amount = final_price - ddvc_price
