@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends
 
 from ..auth import require_api_key
 from ..db import get_pool
+from ..error_handler import log_endpoint_errors
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
 
 
 @router.get("/settings")
+@log_endpoint_errors
 async def get_settings():
     pool = await get_pool()
     rows = await pool.fetch("SELECT key, value FROM panel_settings")
@@ -20,6 +22,7 @@ async def get_settings():
 
 
 @router.patch("/settings")
+@log_endpoint_errors
 async def patch_settings(body: dict):
     pool = await get_pool()
     for key, value in body.items():

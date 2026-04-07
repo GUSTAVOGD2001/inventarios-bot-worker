@@ -5,11 +5,13 @@ from fastapi import APIRouter, Depends
 
 from ..auth import require_api_key
 from ..db import get_pool
+from ..error_handler import log_endpoint_errors
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
 
 
 @router.get("/stats/summary")
+@log_endpoint_errors
 async def stats_summary():
     pool = await get_pool()
 

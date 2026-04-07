@@ -6,12 +6,22 @@ from fastapi import APIRouter, Depends, Query
 from ..auth import require_api_key
 from ..config import settings
 from ..db import get_pool
+from ..error_handler import log_endpoint_errors
 from ..models import WorkerTrigger
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
 
 
+def _parse_naive_dt(s: str) -> datetime:
+    """Parse ISO datetime string and strip timezone info to get a naive datetime."""
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return dt
+
+
 @router.get("/worker/status")
+@log_endpoint_errors
 async def worker_status():
     pool = await get_pool()
 
@@ -58,6 +68,7 @@ async def worker_status():
 
 
 @router.post("/worker/sync")
+@log_endpoint_errors
 async def trigger_sync(body: WorkerTrigger):
     pool = await get_pool()
     payload = json.dumps({
@@ -74,6 +85,7 @@ async def trigger_sync(body: WorkerTrigger):
 
 
 @router.get("/worker/history")
+@log_endpoint_errors
 async def worker_history(
     since: str | None = None,
     status: str | None = None,
@@ -87,7 +99,7 @@ async def worker_history(
 
     if since:
         conditions.append(f"started_at >= ${idx}")
-        params.append(datetime.fromisoformat(since))
+        params.append(_parse_naive_dt(since))
         idx += 1
     if status:
         conditions.append(f"error IS {'NOT NULL' if status == 'error' else 'NULL'}")
@@ -107,6 +119,7 @@ async def worker_history(
 
 
 @router.get("/worker/progress")
+@log_endpoint_errors
 async def worker_progress():
     """Retorna el progreso actual del sync para el monitor en vivo."""
     pool = await get_pool()
