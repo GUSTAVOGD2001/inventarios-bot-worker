@@ -134,3 +134,18 @@ class StatsSummary(BaseModel):
     out_of_stock: int = 0
     changes_today: int = 0
     settings: dict = {}
+
+
+# --- SKU Exemptions ---
+
+class SkuExemptionCreate(BaseModel):
+    sku: str = Field(..., max_length=100)
+    exempt_inventory: bool = False
+    exempt_price: bool = False
+    notes: str | None = None
+
+
+class SkuExemptionUpdate(BaseModel):
+    exempt_inventory: bool | None = None
+    exempt_price: bool | None = None
+    notes: str | None = None

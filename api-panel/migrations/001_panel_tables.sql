@@ -54,3 +54,16 @@ CREATE TABLE IF NOT EXISTS price_change_log (
 CREATE INDEX IF NOT EXISTS idx_price_change_log_sku ON price_change_log(sku);
 CREATE INDEX IF NOT EXISTS idx_price_change_log_created ON price_change_log(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sku_overrides_sku ON sku_overrides(sku);
+
+-- Exenciones de SKU (no sincronizar inventario y/o precio)
+CREATE TABLE IF NOT EXISTS sku_exemptions (
+    id                  SERIAL PRIMARY KEY,
+    sku                 VARCHAR(100) NOT NULL UNIQUE,
+    exempt_inventory    BOOLEAN NOT NULL DEFAULT false,
+    exempt_price        BOOLEAN NOT NULL DEFAULT false,
+    notes               TEXT,
+    created_at          TIMESTAMPTZ DEFAULT now(),
+    updated_at          TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sku_exemptions_sku ON sku_exemptions(sku);
