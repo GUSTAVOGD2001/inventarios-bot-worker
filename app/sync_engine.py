@@ -479,6 +479,18 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     "error": error_message
                 }
             }))
+            # Trim history tables to keep DB lean (max 100K each)
+            try:
+                deleted_actions = db.trim_table_to_max_rows(engine, "sync_actions", 100000)
+                deleted_prices = db.trim_table_to_max_rows(engine, "price_change_log", 100000)
+                if deleted_actions > 0 or deleted_prices > 0:
+                    logger.info(
+                        "DB trim: deleted %s sync_actions, %s price_change_log (cap=100K)",
+                        deleted_actions,
+                        deleted_prices,
+                    )
+            except Exception:
+                logger.warning("Failed to trim history tables", exc_info=True)
             db.release_lock(lock_conn)
 
     duration = (dt.datetime.now(dt.timezone.utc) - start).total_seconds()
