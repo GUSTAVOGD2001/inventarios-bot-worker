@@ -7,6 +7,12 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     run_interval_min: int = 60
 
+    # Shopify (para buscador en vivo)
+    shopify_shop: str = ""
+    shopify_client_id: str = ""
+    shopify_client_secret: str = ""
+    shopify_api_version: str = "2026-01"
+
     class Config:
         env_file = ".env"
 
