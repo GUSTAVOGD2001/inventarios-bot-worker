@@ -431,6 +431,10 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     or (status["price_needed"] and not status["price_success"])
                 ):
                     continue
+                # Skip sku_state update for exempted SKUs to preserve manual state
+                exemption = sku_exemptions.get(sku_norm, {})
+                if exemption.get("exempt_inventory") or exemption.get("exempt_price"):
+                    continue
                 ddvc_salable = desired["ddvc_salable"]
                 ddvc_price = desired["ddvc_price"]
                 target_qty = desired["target_qty"]
