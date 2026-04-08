@@ -348,3 +348,41 @@ def upsert_sku_state(
                 "updated_at": now,
             },
         )
+
+
+def trim_table_to_max_rows(engine: Engine, table_name: str, max_rows: int = 100000) -> int:
+    """
+    Mantiene una tabla con como máximo max_rows registros.
+    Si excede, elimina los más viejos por created_at.
+    Retorna la cantidad de registros eliminados.
+
+    Solo permite tablas pre-aprobadas para evitar SQL injection.
+    """
+    ALLOWED_TABLES = {"sync_actions", "price_change_log"}
+    if table_name not in ALLOWED_TABLES:
+        raise ValueError(f"Table {table_name} not allowed for trimming")
+
+    with engine.begin() as conn:
+        # Contar filas actuales
+        total = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar() or 0
+        if total <= max_rows:
+            return 0
+
+        # Calcular cuántas filas eliminar
+        to_delete = total - max_rows
+
+        # Eliminar las más viejas usando subquery
+        result = conn.execute(
+            text(
+                f"""
+                DELETE FROM {table_name}
+                WHERE id IN (
+                    SELECT id FROM {table_name}
+                    ORDER BY created_at ASC
+                    LIMIT :limit
+                )
+                """
+            ),
+            {"limit": to_delete},
+        )
+        return result.rowcount or 0
