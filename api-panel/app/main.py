@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 
 from .config import settings
 from .db import close_pool, create_pool, run_migrations
-from .routers import exemptions, inventory, prices, pricing, settings as settings_router, skus, stats, worker
+from .routers import exemptions, health, inventory, prices, pricing, settings as settings_router, skus, stats, worker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,10 +52,11 @@ app.include_router(settings_router.router, prefix="/api/v1", tags=["settings"])
 app.include_router(worker.router, prefix="/api/v1", tags=["worker"])
 app.include_router(stats.router, prefix="/api/v1", tags=["stats"])
 app.include_router(exemptions.router, prefix="/api/v1", tags=["exemptions"])
+app.include_router(health.router, prefix="/api/v1", tags=["health"])
 
 
 @app.get("/health")
-async def health():
+async def health_ping():
     return {"status": "ok"}
 
 

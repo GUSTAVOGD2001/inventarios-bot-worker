@@ -29,15 +29,16 @@ async def close_pool() -> None:
 
 
 async def run_migrations() -> None:
-    """Execute all SQL migration files (idempotent)."""
+    """Execute all SQL migration files in order (idempotent)."""
     if pool is None:
         raise RuntimeError("Pool not initialized")
-    migration_file = MIGRATIONS_DIR / "001_panel_tables.sql"
-    if migration_file.exists():
-        sql = migration_file.read_text()
-        async with pool.acquire() as conn:
+    migration_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    async with pool.acquire() as conn:
+        for migration_file in migration_files:
+            sql = migration_file.read_text()
             await conn.execute(sql)
-        logger.info("Migrations executed successfully")
+            logger.info("Migration executed: %s", migration_file.name)
+    logger.info("All migrations executed successfully")
 
 
 async def get_pool() -> asyncpg.Pool:
