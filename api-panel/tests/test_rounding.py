@@ -1,6 +1,6 @@
 import pytest
 
-from app.rounding import round_up_x9_99
+from app.rounding import round_up_x9_99, round_nearest_99_cents
 
 
 @pytest.mark.parametrize(
@@ -24,3 +24,29 @@ from app.rounding import round_up_x9_99
 )
 def test_round_up_x9_99(price, expected):
     assert round_up_x9_99(price) == expected
+
+
+@pytest.mark.parametrize(
+    "price, expected",
+    [
+        (56.00, 56.99),
+        (56.30, 56.99),
+        (56.99, 56.99),
+        (57.01, 57.99),
+        (57.30, 57.99),
+        (57.60, 57.99),  # NO sube a 58.99
+        (58.40, 58.99),
+        (142.30, 142.99),
+        (199.99, 199.99),
+        (1.00, 1.99),
+        (0.50, 0.99),
+        (0.01, 0.99),
+    ],
+)
+def test_round_nearest_99_cents(price, expected):
+    assert round_nearest_99_cents(price) == expected
+
+
+def test_user_reported_case_56_30_should_be_56_99():
+    """Caso real reportado: 56.30 debe convertirse en 56.99, no en 55.99"""
+    assert round_nearest_99_cents(56.30) == 56.99

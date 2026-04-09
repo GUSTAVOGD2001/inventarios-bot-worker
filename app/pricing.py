@@ -38,13 +38,19 @@ def round_up_x9_99(price: float) -> float:
 
 
 def round_nearest_99_cents(price: float) -> float:
-    """Cambia los centavos al .99 del entero más cercano.
-    57.30 → 57.99, 58.40 → 58.99, 142.30 → 142.99
+    """Pone los centavos en .99 del MISMO entero, sin bajar.
+    Ejemplos:
+        56.00 → 56.99
+        56.30 → 56.99
+        56.99 → 56.99 (ya está)
+        57.01 → 57.99
+        142.30 → 142.99
     """
-    if price < 1:
+    if price <= 0.99:
         return 0.99
-    nearest_int = round(price)
-    return round(nearest_int - 0.01, 2) if nearest_int > 0 else 0.99
+    integer_part = math.floor(price)
+    candidate = integer_part + 0.99
+    return round(candidate, 2)
 
 
 def apply_rounding(price: float, threshold: float, low_mode: str, high_mode: str) -> tuple[float, str]:
