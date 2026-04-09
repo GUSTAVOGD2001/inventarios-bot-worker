@@ -120,33 +120,71 @@ class PricingEngine:
 
     def load_rules(self) -> None:
         """Llamar una vez al inicio de cada sync run."""
+        # Defaults seguros
+        self.overrides = {}
+        self.global_rule = None
+        self.rounding_enabled = False
+        self.rounding_threshold = 200.0
+        self.rounding_low_mode = "nearest_99"
+        self.rounding_high_mode = "ceil_x9_99"
+        self.global_markup_enabled = True
+
+        # 1. Overrides
         try:
             self.overrides = _load_overrides(self.engine)
+            logger.info("Loaded %s SKU overrides", len(self.overrides))
+        except Exception as exc:
+            logger.error("Failed to load sku_overrides: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        # 2. Global rule
+        try:
             self.global_rule = _load_global_rule(self.engine)
-            self.rounding_enabled = bool(_get_setting(self.engine, "rounding_enabled"))
-            self.rounding_threshold = float(_get_setting(self.engine, "rounding_threshold") or 200)
-            self.rounding_low_mode = _get_setting(self.engine, "rounding_low_mode") or "nearest_99"
-            self.rounding_high_mode = _get_setting(self.engine, "rounding_high_mode") or "ceil_x9_99"
-            self.global_markup_enabled = bool(_get_setting(self.engine, "global_markup_enabled"))
-            logger.info(
-                "Pricing rules loaded: overrides=%s global_rule=%s rounding=%s threshold=%s low=%s high=%s markup_enabled=%s",
-                len(self.overrides),
-                self.global_rule["name"] if self.global_rule else "none",
-                self.rounding_enabled,
-                self.rounding_threshold,
-                self.rounding_low_mode,
-                self.rounding_high_mode,
-                self.global_markup_enabled,
-            )
-        except Exception:
-            logger.warning("Could not load pricing rules from panel tables. Using DDVC prices directly.")
-            self.overrides = {}
-            self.global_rule = None
-            self.rounding_enabled = False
-            self.rounding_threshold = 200.0
-            self.rounding_low_mode = "nearest_99"
-            self.rounding_high_mode = "ceil_x9_99"
-            self.global_markup_enabled = True
+            logger.info("Loaded global rule: %s", self.global_rule["name"] if self.global_rule else "none")
+        except Exception as exc:
+            logger.error("Failed to load pricing_rules: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        # 3. Settings (los más importantes)
+        try:
+            rounding_enabled_val = _get_setting(self.engine, "rounding_enabled")
+            self.rounding_enabled = bool(rounding_enabled_val)
+            logger.info("rounding_enabled raw=%r → bool=%s", rounding_enabled_val, self.rounding_enabled)
+        except Exception as exc:
+            logger.error("Failed to load rounding_enabled: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        try:
+            threshold_val = _get_setting(self.engine, "rounding_threshold")
+            self.rounding_threshold = float(threshold_val) if threshold_val is not None else 200.0
+        except Exception as exc:
+            logger.error("Failed to load rounding_threshold: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        try:
+            low_mode_val = _get_setting(self.engine, "rounding_low_mode")
+            self.rounding_low_mode = low_mode_val if low_mode_val else "nearest_99"
+        except Exception as exc:
+            logger.error("Failed to load rounding_low_mode: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        try:
+            high_mode_val = _get_setting(self.engine, "rounding_high_mode")
+            self.rounding_high_mode = high_mode_val if high_mode_val else "ceil_x9_99"
+        except Exception as exc:
+            logger.error("Failed to load rounding_high_mode: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        try:
+            markup_val = _get_setting(self.engine, "global_markup_enabled")
+            self.global_markup_enabled = bool(markup_val) if markup_val is not None else True
+        except Exception as exc:
+            logger.error("Failed to load global_markup_enabled: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        logger.info(
+            "Pricing rules FINAL: overrides=%s global_rule=%s rounding=%s threshold=%s low=%s high=%s markup_enabled=%s",
+            len(self.overrides),
+            self.global_rule["name"] if self.global_rule else "none",
+            self.rounding_enabled,
+            self.rounding_threshold,
+            self.rounding_low_mode,
+            self.rounding_high_mode,
+            self.global_markup_enabled,
+        )
 
     def calculate(self, sku_norm: str, ddvc_price: float) -> PriceResult:
         """
