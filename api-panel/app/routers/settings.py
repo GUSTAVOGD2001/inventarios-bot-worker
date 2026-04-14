@@ -8,6 +8,13 @@ from ..error_handler import log_endpoint_errors
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
 
+# Defaults para settings que pueden no estar en la tabla todavía
+# (instalaciones viejas donde la migración no insertó las filas).
+SETTINGS_DEFAULTS = {
+    "price_cap_enabled": True,
+    "price_cap_max": 10000,
+}
+
 
 @router.get("/settings")
 @log_endpoint_errors
@@ -18,6 +25,9 @@ async def get_settings():
     for r in rows:
         val = r["value"]
         result[r["key"]] = json.loads(val) if isinstance(val, str) else val
+    for key, default_val in SETTINGS_DEFAULTS.items():
+        if key not in result:
+            result[key] = default_val
     return result
 
 
