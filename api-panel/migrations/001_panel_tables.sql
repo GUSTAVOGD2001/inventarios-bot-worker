@@ -36,7 +36,9 @@ INSERT INTO panel_settings (key, value) VALUES
     ('global_markup_enabled', 'true'),
     ('rounding_threshold', '200'),
     ('rounding_low_mode', '"nearest_99"'),
-    ('rounding_high_mode', '"ceil_x9_99"')
+    ('rounding_high_mode', '"ceil_x9_99"'),
+    ('price_cap_enabled', 'true'),
+    ('price_cap_max', '10000')
 ON CONFLICT (key) DO NOTHING;
 
 -- Historial de cambios de precio

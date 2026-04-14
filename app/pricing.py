@@ -117,6 +117,8 @@ class PricingEngine:
         self.rounding_low_mode: str = "nearest_99"
         self.rounding_high_mode: str = "ceil_x9_99"
         self.global_markup_enabled: bool = True
+        self.price_cap_enabled: bool = True
+        self.price_cap_max: float = 10000.0
 
     def load_rules(self) -> None:
         """Llamar una vez al inicio de cada sync run."""
@@ -128,6 +130,8 @@ class PricingEngine:
         self.rounding_low_mode = "nearest_99"
         self.rounding_high_mode = "ceil_x9_99"
         self.global_markup_enabled = True
+        self.price_cap_enabled = True
+        self.price_cap_max = 10000.0
 
         # 1. Overrides
         try:
@@ -175,8 +179,20 @@ class PricingEngine:
         except Exception as exc:
             logger.error("Failed to load global_markup_enabled: %s: %s", type(exc).__name__, str(exc), exc_info=True)
 
+        try:
+            cap_enabled_val = _get_setting(self.engine, "price_cap_enabled")
+            self.price_cap_enabled = bool(cap_enabled_val) if cap_enabled_val is not None else True
+        except Exception as exc:
+            logger.error("Failed to load price_cap_enabled: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        try:
+            cap_max_val = _get_setting(self.engine, "price_cap_max")
+            self.price_cap_max = float(cap_max_val) if cap_max_val is not None else 10000.0
+        except Exception as exc:
+            logger.error("Failed to load price_cap_max: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
         logger.info(
-            "Pricing rules FINAL: overrides=%s global_rule=%s rounding=%s threshold=%s low=%s high=%s markup_enabled=%s",
+            "Pricing rules FINAL: overrides=%s global_rule=%s rounding=%s threshold=%s low=%s high=%s markup_enabled=%s price_cap_enabled=%s price_cap_max=%s",
             len(self.overrides),
             self.global_rule["name"] if self.global_rule else "none",
             self.rounding_enabled,
@@ -184,6 +200,8 @@ class PricingEngine:
             self.rounding_low_mode,
             self.rounding_high_mode,
             self.global_markup_enabled,
+            self.price_cap_enabled,
+            self.price_cap_max,
         )
 
     def calculate(self, sku_norm: str, ddvc_price: float) -> PriceResult:
@@ -231,6 +249,26 @@ class PricingEngine:
                 override_applied = f"fixed_amount: +${oval:.2f}"
                 steps.append(f"Override +${oval:.2f}: ${price:.2f}")
         else:
+            # Step 1b: Price cap check (solo cuando NO hay override)
+            # Productos arriba del cap se dejan al precio DDVC tal cual:
+            # no markup global ni redondeo. Los overrides ignoran este límite.
+            if self.price_cap_enabled and ddvc_price > self.price_cap_max:
+                steps.append(
+                    f"Price cap: ${ddvc_price:.2f} > ${self.price_cap_max:.2f}, "
+                    f"saltando markup y redondeo"
+                )
+                return PriceResult(
+                    sku=sku_norm,
+                    ddvc_price=ddvc_price,
+                    final_price=ddvc_price,
+                    override_applied=None,
+                    global_rule_applied="price_cap_skip",
+                    rounding_applied=False,
+                    steps=steps,
+                    margin_amount=0.0,
+                    margin_percent=0.0,
+                )
+
             # Step 2: Global rule (solo si no hay override y markup está habilitado)
             if self.global_markup_enabled and self.global_rule:
                 rule = self.global_rule
