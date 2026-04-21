@@ -448,6 +448,36 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     last_seen_ddvc_at=last_seen_ddvc_at if isinstance(last_seen_ddvc_at, dt.datetime) else None,
                     last_sync_status="applied" if status and (status["inventory_needed"] or status["price_needed"]) else "noop",
                 )
+
+            # ── Registrar SKUs que están en DDVC pero no en Shopify ──
+            # Esto permite que el dashboard muestre "Solo en DDVC" correctamente.
+            ddvc_only_count = 0
+            for ddvc_sku_raw, ddvc_data in ddvc_map.items():
+                ddvc_sku_norm = normalize_sku(ddvc_sku_raw)
+                if not ddvc_sku_norm:
+                    continue
+                if ddvc_sku_norm in shopify_map:
+                    continue  # Ya fue procesado en el loop principal
+                ddvc_only_count += 1
+                ddvc_price_raw = ddvc_data.get("final_price")
+                ddvc_price_val: Optional[float] = None
+                if ddvc_price_raw is not None:
+                    try:
+                        ddvc_price_val = float(ddvc_price_raw)
+                    except (TypeError, ValueError):
+                        pass
+                is_salable = ddvc_data.get("is_salable")
+                db.upsert_sku_state(
+                    engine,
+                    sku=ddvc_sku_norm,
+                    ddvc_salable=bool(is_salable) if is_salable is not None else None,
+                    ddvc_price=ddvc_price_val,
+                    target_qty=None,
+                    last_seen_ddvc_at=dt.datetime.now(dt.timezone.utc),
+                    last_sync_status="ddvc_only",
+                )
+            if ddvc_only_count > 0:
+                logger.info("Registered %s DDVC-only SKUs in sku_state", ddvc_only_count)
         except Exception as exc:
             error_message = str(exc)
             raise
