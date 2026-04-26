@@ -64,6 +64,10 @@ class GraphQLError(RuntimeError):
     pass
 
 
+class DDVCFetchIntegrityError(RuntimeError):
+    """Raised when a DDVC full fetch is incomplete or inconsistent."""
+
+
 def gql(graphql_url: str, query: str, variables: dict, timeout_s: float) -> dict:
     response = requests.post(graphql_url, json={"query": query, "variables": variables}, timeout=timeout_s)
     response.raise_for_status()
@@ -82,6 +86,8 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
     log_every = int(os.getenv("DDVC_LOG_EVERY_PAGES", "5"))
     max_pages = os.getenv("DDVC_MAX_PAGES")
     max_pages = int(max_pages) if max_pages and max_pages.isdigit() else None
+    count_tolerance_abs = int(os.getenv("DDVC_TOTAL_COUNT_TOLERANCE_ABS", "0"))
+    count_tolerance_pct = float(os.getenv("DDVC_TOTAL_COUNT_TOLERANCE_PCT", "0"))
     retry_limit = 3
     start_time = time.time()
     current_page = 1
@@ -91,6 +97,7 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
     fail_pages = 0
     regular_price_count = 0
     final_price_only_count = 0
+    fetched_items_count = 0
     results: Dict[str, Dict[str, Optional[float]]] = {}
 
     logger.info("DDVC full fetch: page_size=%s timeout=%s", page_size, timeout)
@@ -145,8 +152,14 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
 
         if payload is None:
             fail_pages += 1
-            current_page += 1
-            continue
+            logger.error(
+                "DDVC full fetch aborting: page=%s failed after %s attempts",
+                current_page,
+                retry_limit,
+            )
+            raise DDVCFetchIntegrityError(
+                f"Failed to fetch DDVC page {current_page} after {retry_limit} attempts"
+            )
 
         ok_pages += 1
         products = payload.get("data", {}).get("products", {})
@@ -154,6 +167,7 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
         page_info = products.get("page_info") or {}
         total_pages = page_info.get("total_pages") or total_pages
         items = products.get("items") or []
+        fetched_items_count += len(items)
 
         if current_page == 1:
             logger.info("DDVC total_count=%s total_pages=%s", total_count, total_pages)
@@ -188,10 +202,12 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
         if current_page != 1 and (current_page % log_every == 0 or current_page == total_pages):
             elapsed = time.time() - start_time
             logger.info(
-                "DDVC progress page=%s/%s rows=%s elapsed=%.1fs",
+                "DDVC progress page=%s/%s page_items=%s rows=%s fetched_items=%s elapsed=%.1fs",
                 current_page,
                 total_pages,
+                len(items),
                 len(results),
+                fetched_items_count,
                 elapsed,
             )
 
@@ -202,6 +218,36 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
         current_page += 1
 
     elapsed = time.time() - start_time
+    expected_pages = total_pages
+    if ok_pages != expected_pages:
+        logger.error(
+            "DDVC full fetch inconsistency: expected_pages=%s ok_pages=%s fail_pages=%s",
+            expected_pages,
+            ok_pages,
+            fail_pages,
+        )
+        raise DDVCFetchIntegrityError(
+            f"Incomplete DDVC pagination: expected {expected_pages} pages, got {ok_pages}"
+        )
+
+    diff = abs((total_count or 0) - fetched_items_count)
+    allowed_diff = max(
+        count_tolerance_abs,
+        int((total_count or 0) * (count_tolerance_pct / 100.0)),
+    )
+    logger.info(
+        "DDVC totals expected_total_count=%s fetched_items=%s unique_skus=%s diff=%s allowed_diff=%s",
+        total_count,
+        fetched_items_count,
+        len(results),
+        diff,
+        allowed_diff,
+    )
+    if diff > allowed_diff:
+        raise DDVCFetchIntegrityError(
+            f"DDVC total_count mismatch: expected={total_count} fetched={fetched_items_count} diff={diff}"
+        )
+
     logger.info("DDVC full fetch done rows=%s pages=%s", len(results), total_pages)
     logger.info(
         "DDVC full fetch summary ok_pages=%s fail_pages=%s elapsed=%.2fs",
