@@ -59,6 +59,17 @@ query GetAllProducts($pageSize: Int!, $currentPage: Int!) {
 }
 """
 
+QUERY_PRODUCT_BY_SKU = """
+query GetProductBySku($sku: String!) {
+  products(filter: { sku: { eq: $sku } }, pageSize: 1, currentPage: 1) {
+    items {
+      sku
+      is_salable
+    }
+  }
+}
+"""
+
 
 class GraphQLError(RuntimeError):
     pass
@@ -262,3 +273,45 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
         final_price_only_count,
     )
     return results
+
+
+def validar_sku_directo(
+    graphql_url: str,
+    sku: str,
+    cache: Optional[Dict[str, tuple[Optional[bool], Optional[bool]]]] = None,
+) -> tuple[Optional[bool], Optional[bool]]:
+    """Valida un SKU directamente contra GraphQL cuando falta en snapshot.
+
+    Retorna:
+      - (True, is_salable) si el SKU existe.
+      - (False, None) si el SKU no existe.
+      - (None, None) si hubo error (fail-safe).
+    """
+    normalized_sku = normalize_sku(sku)
+    if not normalized_sku:
+        return False, None
+
+    if cache is not None and normalized_sku in cache:
+        return cache[normalized_sku]
+
+    timeout = float(os.getenv("DDVC_DIRECT_CHECK_TIMEOUT", os.getenv("DDVC_TIMEOUT", "30")))
+    try:
+        payload = gql(
+            graphql_url=graphql_url,
+            query=QUERY_PRODUCT_BY_SKU,
+            variables={"sku": normalized_sku},
+            timeout_s=timeout,
+        )
+        items = payload.get("data", {}).get("products", {}).get("items") or []
+        if not items:
+            result: tuple[Optional[bool], Optional[bool]] = (False, None)
+        else:
+            is_salable = items[0].get("is_salable")
+            result = (True, bool(is_salable) if is_salable is not None else None)
+    except Exception as exc:
+        logger.error("Fallback direct SKU validation failed sku=%s error=%s", normalized_sku, exc)
+        result = (None, None)
+
+    if cache is not None:
+        cache[normalized_sku] = result
+    return result
