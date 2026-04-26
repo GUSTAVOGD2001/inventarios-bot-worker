@@ -65,7 +65,14 @@ def apply_rounding(price: float, threshold: float, low_mode: str, high_mode: str
 
 
 def _get_setting(engine: Engine, key: str):
-    """Lee un valor de panel_settings."""
+    """Lee un valor de panel_settings.
+
+    La columna `value` es JSONB. psycopg2 ya deserializa JSONB a tipos Python
+    nativos (bool/int/float/str/dict/list), así que lo normal es recibir el
+    valor listo para usar. Si por alguna razón viene como str, intentamos
+    json.loads y caemos al string crudo si no es JSON válido (caso típico:
+    valores legados guardados como texto plano sin comillas dobles).
+    """
     with engine.connect() as conn:
         row = conn.execute(
             text("SELECT value FROM panel_settings WHERE key = :key"),
@@ -75,7 +82,10 @@ def _get_setting(engine: Engine, key: str):
             return None
         val = row[0]
         if isinstance(val, str):
-            return json.loads(val)
+            try:
+                return json.loads(val)
+            except json.JSONDecodeError:
+                return val
         return val
 
 
