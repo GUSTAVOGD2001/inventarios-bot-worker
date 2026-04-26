@@ -7,6 +7,8 @@ from typing import Dict, Optional
 
 import requests
 
+from app.sku_utils import normalize_sku
+
 logger = logging.getLogger(__name__)
 
 QUERY_PRODUCTS = """
@@ -119,7 +121,7 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
         for item in items:
             if not item:
                 continue
-            sku = (item.get("sku") or "").strip()
+            sku = normalize_sku(item.get("sku"))
             if sku == "":
                 continue
             min_price = item.get("price_range", {}).get("minimum_price", {})
