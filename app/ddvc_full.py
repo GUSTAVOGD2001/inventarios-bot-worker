@@ -21,6 +21,31 @@ query GetAllProducts($pageSize: Int!, $currentPage: Int!) {
     items {
       sku
       is_salable
+      stock_status
+      price_range {
+        minimum_price {
+          regular_price { value currency }
+          final_price { value currency }
+        }
+      }
+    }
+    page_info { current_page total_pages }
+    total_count
+  }
+}
+"""
+
+# Fallback query used if the DDVC schema does not expose `stock_status`.
+QUERY_PRODUCTS_NO_STOCK_STATUS = """
+query GetAllProducts($pageSize: Int!, $currentPage: Int!) {
+  products(
+    filter: {}
+    pageSize: $pageSize
+    currentPage: $currentPage
+  ) {
+    items {
+      sku
+      is_salable
       price_range {
         minimum_price {
           regular_price { value currency }
@@ -70,6 +95,10 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
 
     logger.info("DDVC full fetch: page_size=%s timeout=%s", page_size, timeout)
 
+    # Empezamos pidiendo stock_status; si el schema no lo soporta, caemos al
+    # query sin ese campo y lo recordamos para todas las siguientes páginas.
+    active_query = QUERY_PRODUCTS
+
     while current_page <= total_pages:
         if max_pages and current_page > max_pages:
             logger.warning("DDVC_MAX_PAGES reached (%s). Stopping early.", max_pages)
@@ -80,11 +109,29 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
             try:
                 payload = gql(
                     graphql_url,
-                    QUERY_PRODUCTS,
+                    active_query,
                     {"pageSize": page_size, "currentPage": current_page},
                     timeout,
                 )
                 break
+            except GraphQLError as exc:
+                # Si el schema no expone stock_status, reintentamos con la
+                # query reducida en esta misma iteración.
+                if active_query is QUERY_PRODUCTS and "stock_status" in str(exc):
+                    logger.warning(
+                        "DDVC schema does not expose stock_status, falling back to is_salable only"
+                    )
+                    active_query = QUERY_PRODUCTS_NO_STOCK_STATUS
+                    continue
+                logger.warning(
+                    "DDVC full fetch failed page=%s attempt=%s/%s error=%s",
+                    current_page,
+                    attempt,
+                    retry_limit,
+                    exc,
+                )
+                if attempt < retry_limit and sleep_seconds > 0:
+                    time.sleep(sleep_seconds)
             except Exception as exc:
                 logger.warning(
                     "DDVC full fetch failed page=%s attempt=%s/%s error=%s",
@@ -129,6 +176,7 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
             final_price = min_price.get("final_price", {}).get("value")
             results[sku] = {
                 "is_salable": item.get("is_salable"),
+                "stock_status": item.get("stock_status"),
                 "regular_price": regular_price,
                 "final_price": final_price,
             }
