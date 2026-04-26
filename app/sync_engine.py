@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 
 from app import db
 from app.config import Settings
-from app.ddvc_full import fetch_ddvc_full
+from app.ddvc_full import DDVCFetchIntegrityError, fetch_ddvc_full
 from app.pricing import PricingEngine, load_sku_exemptions, log_price_change
 from app.shopify_client import ShopifyClient, ShopifyVariantSnapshot
 from app.sku_utils import normalize_sku
@@ -186,8 +186,13 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     not_found_count += 1
                     is_salable = None
                     ddvc_price = None
-                    qty_target = settings.out_of_stock_qty
+                    qty_target = shopify_item.quantity
                     last_seen = None
+                    logger.warning(
+                        "SKU %s not present in DDVC snapshot; preserving current inventory=%s to avoid false not_found",
+                        sku_norm,
+                        _stringify(shopify_item.quantity),
+                    )
 
                 desired_state[sku_norm] = {
                     "ddvc_salable": is_salable,
@@ -232,12 +237,8 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     inventory_updates.append((shopify_item.inventory_item_id, qty_target))
                     sku_status[sku_norm]["inventory_needed"] = True
                     sku_status[sku_norm]["inventory_success"] = False
-                    if qty_target == settings.out_of_stock_qty:
-                        reason = (
-                            "not_found_in_ddvc"
-                            if ddvc_item is None
-                            else f"is_salable={is_salable!r} stock_status={stock_status!r}"
-                        )
+                    if ddvc_item is not None and qty_target == settings.out_of_stock_qty:
+                        reason = f"is_salable={is_salable!r} stock_status={stock_status!r}"
                         logger.info(
                             "SKU %s inventory %s -> %s (reason=%s)",
                             sku_norm,
@@ -512,6 +513,8 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 )
             if ddvc_only_count > 0:
                 logger.info("Registered %s DDVC-only SKUs in sku_state", ddvc_only_count)
+        except DDVCFetchIntegrityError:
+            raise
         except Exception as exc:
             error_message = str(exc)
             raise
