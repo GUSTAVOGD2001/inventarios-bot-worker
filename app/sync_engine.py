@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 
 from app import db
 from app.config import Settings
-from app.ddvc_full import DDVCFetchIntegrityError, fetch_ddvc_full
+from app.ddvc_full import DDVCFetchIntegrityError, fetch_ddvc_full, validar_sku_directo
 from app.pricing import PricingEngine, load_sku_exemptions, log_price_change
 from app.shopify_client import ShopifyClient, ShopifyVariantSnapshot
 from app.sku_utils import normalize_sku
@@ -128,6 +128,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             }))
 
             sku_states = db.load_sku_states(engine)
+            fallback_validation_cache: Dict[str, tuple[Optional[bool], Optional[bool]]] = {}
             inventory_updates: List[Tuple[str, int]] = []
             price_updates: List[Tuple[str, str, float]] = []
             inventory_actions: List[Tuple[int, str, str, int]] = []
@@ -183,16 +184,54 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                         qty_target = settings.in_stock_qty
                     last_seen = dt.datetime.now(dt.timezone.utc)
                 else:
-                    not_found_count += 1
-                    is_salable = None
-                    ddvc_price = None
-                    qty_target = shopify_item.quantity
-                    last_seen = None
-                    logger.warning(
-                        "SKU %s not present in DDVC snapshot; preserving current inventory=%s to avoid false not_found",
-                        sku_norm,
-                        _stringify(shopify_item.quantity),
+                    exists, fallback_is_salable = validar_sku_directo(
+                        graphql_url=settings.ddvc_graphql,
+                        sku=sku_norm,
+                        cache=fallback_validation_cache,
                     )
+                    ddvc_price = None
+                    stock_status = None
+                    if exists is True:
+                        found_count += 1
+                        is_salable = fallback_is_salable
+                        if is_salable is True:
+                            qty_target = settings.in_stock_qty
+                        elif is_salable is False:
+                            qty_target = settings.out_of_stock_qty
+                        else:
+                            qty_target = shopify_item.quantity
+                            logger.warning(
+                                "SKU %s validated by fallback (exists) but is_salable is null; preserving inventory=%s",
+                                sku_norm,
+                                _stringify(shopify_item.quantity),
+                            )
+                        last_seen = dt.datetime.now(dt.timezone.utc)
+                        logger.info(
+                            "SKU %s validated by fallback (exists=%s, is_salable=%s) qty_target=%s",
+                            sku_norm,
+                            exists,
+                            is_salable,
+                            _stringify(qty_target),
+                        )
+                    elif exists is False:
+                        not_found_count += 1
+                        is_salable = None
+                        qty_target = settings.out_of_stock_qty
+                        last_seen = None
+                        logger.info(
+                            "SKU %s confirmed missing by fallback; setting inventory to out_of_stock_qty=%s",
+                            sku_norm,
+                            settings.out_of_stock_qty,
+                        )
+                    else:
+                        is_salable = None
+                        qty_target = shopify_item.quantity
+                        last_seen = None
+                        logger.error(
+                            "SKU %s fallback validation error; preserving current inventory=%s (fail-safe)",
+                            sku_norm,
+                            _stringify(shopify_item.quantity),
+                        )
 
                 desired_state[sku_norm] = {
                     "ddvc_salable": is_salable,
