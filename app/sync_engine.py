@@ -97,6 +97,8 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             }))
 
             ddvc_map = fetch_ddvc_full(graphql_url=settings.ddvc_graphql)
+            # Normalizar keys de DDVC para evitar case mismatches
+            ddvc_map = {normalize_sku(k): v for k, v in ddvc_map.items() if normalize_sku(k)}
             ddvc_rows = len(ddvc_map)
             logger.info("DDVC map ready rows=%s", ddvc_rows)
 
@@ -160,7 +162,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                             ddvc_price = float(ddvc_price_raw)
                         except (TypeError, ValueError):
                             ddvc_price = None
-                    qty_target = settings.in_stock_qty if is_salable is True else settings.out_of_stock_qty
+                    qty_target = settings.in_stock_qty if is_salable else settings.out_of_stock_qty
                     last_seen = dt.datetime.now(dt.timezone.utc)
                 else:
                     not_found_count += 1
@@ -442,7 +444,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 db.upsert_sku_state(
                     engine,
                     sku=sku_norm,
-                    ddvc_salable=ddvc_salable if isinstance(ddvc_salable, bool) or ddvc_salable is None else None,
+                    ddvc_salable=bool(ddvc_salable) if ddvc_salable is not None else None,
                     ddvc_price=ddvc_price if isinstance(ddvc_price, (float, int)) or ddvc_price is None else None,
                     target_qty=target_qty if isinstance(target_qty, (float, int)) or target_qty is None else None,
                     last_seen_ddvc_at=last_seen_ddvc_at if isinstance(last_seen_ddvc_at, dt.datetime) else None,
