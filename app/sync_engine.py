@@ -148,9 +148,11 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     continue
 
                 ddvc_item = ddvc_map.get(sku_norm)
+                stock_status: Optional[str] = None
                 if ddvc_item:
                     found_count += 1
                     is_salable = ddvc_item.get("is_salable")
+                    stock_status = ddvc_item.get("stock_status")
                     ddvc_price_raw = ddvc_item.get("final_price")
                     ddvc_price: Optional[float]
                     if ddvc_price_raw is None:
@@ -160,7 +162,25 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                             ddvc_price = float(ddvc_price_raw)
                         except (TypeError, ValueError):
                             ddvc_price = None
-                    qty_target = settings.in_stock_qty if is_salable is True else settings.out_of_stock_qty
+                    # En DDVC el SKU está presente. Lo tratamos como disponible
+                    # si CUALQUIERA de las señales lo dice: stock_status=IN_STOCK
+                    # o is_salable=True. Solo cae a agotado cuando ambas señales
+                    # son explícitamente negativas (OUT_OF_STOCK / False).
+                    stock_status_norm = (stock_status or "").upper() if isinstance(stock_status, str) else None
+                    available = stock_status_norm == "IN_STOCK" or is_salable is True
+                    explicit_oos = (
+                        stock_status_norm == "OUT_OF_STOCK"
+                        or is_salable is False
+                    )
+                    if available:
+                        qty_target = settings.in_stock_qty
+                    elif explicit_oos:
+                        qty_target = settings.out_of_stock_qty
+                    else:
+                        # Sin señal clara (is_salable=None y stock_status=None):
+                        # el SKU existe en DDVC, asumimos disponible para no
+                        # marcar como agotado por falta de información.
+                        qty_target = settings.in_stock_qty
                     last_seen = dt.datetime.now(dt.timezone.utc)
                 else:
                     not_found_count += 1
@@ -212,12 +232,26 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     inventory_updates.append((shopify_item.inventory_item_id, qty_target))
                     sku_status[sku_norm]["inventory_needed"] = True
                     sku_status[sku_norm]["inventory_success"] = False
-                    logger.info(
-                        "SKU %s inventory %s -> %s",
-                        sku_norm,
-                        _stringify(shopify_item.quantity),
-                        _stringify(qty_target),
-                    )
+                    if qty_target == settings.out_of_stock_qty:
+                        reason = (
+                            "not_found_in_ddvc"
+                            if ddvc_item is None
+                            else f"is_salable={is_salable!r} stock_status={stock_status!r}"
+                        )
+                        logger.info(
+                            "SKU %s inventory %s -> %s (reason=%s)",
+                            sku_norm,
+                            _stringify(shopify_item.quantity),
+                            _stringify(qty_target),
+                            reason,
+                        )
+                    else:
+                        logger.info(
+                            "SKU %s inventory %s -> %s",
+                            sku_norm,
+                            _stringify(shopify_item.quantity),
+                            _stringify(qty_target),
+                        )
                     planned_action = True
 
                 if ddvc_price is not None and not exempt_price:
