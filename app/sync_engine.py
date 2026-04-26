@@ -150,6 +150,28 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     continue
 
                 ddvc_item = ddvc_map.get(sku_norm)
+                # DEBUG: log detallado para SKU específico
+                DEBUG_SKU = "HUASPCG3"
+                if sku_norm == DEBUG_SKU:
+                    logger.info(
+                        "DEBUG %s: shopify_quantity=%r shopify_price=%r shopify_variant_id=%r shopify_inventory_item_id=%r",
+                        sku_norm,
+                        shopify_item.quantity,
+                        shopify_item.price,
+                        shopify_item.variant_id,
+                        shopify_item.inventory_item_id,
+                    )
+                    if ddvc_item:
+                        logger.info(
+                            "DEBUG %s: ddvc_is_salable=%r (type=%s) ddvc_final_price=%r ddvc_regular_price=%r",
+                            sku_norm,
+                            ddvc_item.get("is_salable"),
+                            type(ddvc_item.get("is_salable")).__name__,
+                            ddvc_item.get("final_price"),
+                            ddvc_item.get("regular_price"),
+                        )
+                    else:
+                        logger.info("DEBUG %s: NOT FOUND in ddvc_map", sku_norm)
                 if ddvc_item:
                     found_count += 1
                     is_salable = ddvc_item.get("is_salable")
@@ -170,6 +192,16 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     ddvc_price = None
                     qty_target = settings.out_of_stock_qty
                     last_seen = None
+
+                if sku_norm == DEBUG_SKU:
+                    logger.info(
+                        "DEBUG %s: computed qty_target=%r (from is_salable=%r). shopify.quantity=%r. qty_needs_update=%r",
+                        sku_norm,
+                        qty_target,
+                        is_salable,
+                        shopify_item.quantity,
+                        shopify_item.quantity != qty_target,
+                    )
 
                 desired_state[sku_norm] = {
                     "ddvc_salable": is_salable,

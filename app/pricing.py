@@ -65,7 +65,10 @@ def apply_rounding(price: float, threshold: float, low_mode: str, high_mode: str
 
 
 def _get_setting(engine: Engine, key: str):
-    """Lee un valor de panel_settings."""
+    """Lee un valor de panel_settings.
+    Maneja casos donde el valor JSONB se almacenó como string raw
+    sin comillas JSON (ej: 'nearest_99' en vez de '"nearest_99"').
+    """
     with engine.connect() as conn:
         row = conn.execute(
             text("SELECT value FROM panel_settings WHERE key = :key"),
@@ -75,7 +78,16 @@ def _get_setting(engine: Engine, key: str):
             return None
         val = row[0]
         if isinstance(val, str):
-            return json.loads(val)
+            try:
+                return json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                # El valor está como string raw sin comillas JSON.
+                # Devolverlo tal cual (útil para enums tipo "nearest_99").
+                logger.warning(
+                    "Setting %s contains non-JSON string value %r, returning as-is",
+                    key, val
+                )
+                return val
         return val
 
 
