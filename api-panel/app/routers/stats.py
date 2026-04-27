@@ -34,6 +34,11 @@ async def stats_summary():
            LEFT JOIN sku_state ss ON ss.sku = sv.sku
            WHERE ss.sku IS NULL"""
     )
+    discontinued = await pool.fetchval(
+        """SELECT COUNT(*) FROM sku_state ss
+           JOIN shopify_variants sv ON sv.sku = ss.sku
+           WHERE ss.last_sync_status = 'discontinued'"""
+    )
 
     in_stock = await pool.fetchval(
         "SELECT COUNT(*) FROM sku_state WHERE ddvc_salable = true"
@@ -46,6 +51,10 @@ async def stats_summary():
     changes_today = await pool.fetchval(
         "SELECT COUNT(*) FROM sync_actions WHERE created_at >= $1",
         today_start,
+    )
+    last_run_batch = await pool.fetchrow(
+        """SELECT batch_validated, batch_confirmed, batch_not_found
+           FROM sync_runs ORDER BY started_at DESC LIMIT 1"""
     )
 
     # Panel settings
@@ -61,8 +70,10 @@ async def stats_summary():
         "matched": matched,
         "ddvc_only": ddvc_only,
         "shopify_only": shopify_only,
+        "discontinued": discontinued,
         "in_stock": in_stock,
         "out_of_stock": out_of_stock,
         "changes_today": changes_today,
+        "last_batch": dict(last_run_batch) if last_run_batch else None,
         "settings": settings_dict,
     }
