@@ -181,7 +181,7 @@ async def sku_search(
     query_sql = """
         SELECT
             COALESCE(ss.sku, sv.sku) AS sku,
-            'Sin título' AS title,
+            COALESCE(sv.title, 'Sin título') AS title,
             sv.variant_id,
             sv.inventory_item_id,
             ss.ddvc_salable,
