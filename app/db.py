@@ -93,7 +93,10 @@ def ensure_schema(engine: Engine) -> None:
                   price_changes INT DEFAULT 0,
                   ddvc_rows INT DEFAULT 0,
                   shopify_rows INT DEFAULT 0,
-                  error TEXT
+                  error TEXT,
+                  batch_validated INT DEFAULT 0,
+                  batch_confirmed INT DEFAULT 0,
+                  batch_not_found INT DEFAULT 0
                 )
                 """
             )
@@ -117,6 +120,18 @@ def ensure_schema(engine: Engine) -> None:
         )
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_sync_actions_run ON sync_actions(run_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_sync_actions_sku ON sync_actions(sku_norm)"))
+        conn.execute(
+            text(
+                """
+                DO $$ BEGIN
+                    ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS batch_validated INT DEFAULT 0;
+                    ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS batch_confirmed INT DEFAULT 0;
+                    ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS batch_not_found INT DEFAULT 0;
+                EXCEPTION WHEN others THEN NULL;
+                END $$;
+                """
+            )
+        )
 
 
 def try_lock(conn: Connection) -> bool:
@@ -163,6 +178,9 @@ def update_sync_run(
     ddvc_rows: int,
     shopify_rows: int,
     error: Optional[str],
+    batch_validated: int = 0,
+    batch_confirmed: int = 0,
+    batch_not_found: int = 0,
 ) -> None:
     with engine.begin() as conn:
         conn.execute(
@@ -176,6 +194,9 @@ def update_sync_run(
                     price_changes = :price_changes,
                     ddvc_rows = :ddvc_rows,
                     shopify_rows = :shopify_rows,
+                    batch_validated = :batch_validated,
+                    batch_confirmed = :batch_confirmed,
+                    batch_not_found = :batch_not_found,
                     error = :error
                 WHERE run_id = :run_id
                 """
@@ -189,6 +210,9 @@ def update_sync_run(
                 "price_changes": price_changes,
                 "ddvc_rows": ddvc_rows,
                 "shopify_rows": shopify_rows,
+                "batch_validated": batch_validated,
+                "batch_confirmed": batch_confirmed,
+                "batch_not_found": batch_not_found,
                 "error": error,
             },
         )
