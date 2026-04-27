@@ -26,6 +26,7 @@ shopify_variants = Table(
     Column("sku", String, primary_key=True),
     Column("variant_id", String, nullable=False),
     Column("inventory_item_id", String, nullable=False),
+    Column("title", String, nullable=True),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -53,6 +54,7 @@ app_kv = Table(
 class VariantInfo:
     variant_id: str
     inventory_item_id: str
+    title: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,16 @@ def ensure_schema(engine: Engine) -> None:
                     ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS batch_validated INT DEFAULT 0;
                     ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS batch_confirmed INT DEFAULT 0;
                     ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS batch_not_found INT DEFAULT 0;
+                EXCEPTION WHEN others THEN NULL;
+                END $$;
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                DO $$ BEGIN
+                    ALTER TABLE shopify_variants ADD COLUMN IF NOT EXISTS title TEXT;
                 EXCEPTION WHEN others THEN NULL;
                 END $$;
                 """
@@ -285,8 +297,8 @@ def set_kv(engine: Engine, key: str, value: str) -> None:
 
 def load_variant_map(engine: Engine) -> Dict[str, VariantInfo]:
     with engine.connect() as conn:
-        rows = conn.execute(text("SELECT sku, variant_id, inventory_item_id FROM shopify_variants")).fetchall()
-        return {row[0]: VariantInfo(variant_id=row[1], inventory_item_id=row[2]) for row in rows}
+        rows = conn.execute(text("SELECT sku, variant_id, inventory_item_id, title FROM shopify_variants")).fetchall()
+        return {row[0]: VariantInfo(variant_id=row[1], inventory_item_id=row[2], title=row[3]) for row in rows}
 
 
 def upsert_variant_map(engine: Engine, entries: Iterable[tuple[str, VariantInfo]]) -> None:
@@ -296,11 +308,12 @@ def upsert_variant_map(engine: Engine, entries: Iterable[tuple[str, VariantInfo]
             conn.execute(
                 text(
                     """
-                    INSERT INTO shopify_variants (sku, variant_id, inventory_item_id, updated_at)
-                    VALUES (:sku, :variant_id, :inventory_item_id, :updated_at)
+                    INSERT INTO shopify_variants (sku, variant_id, inventory_item_id, title, updated_at)
+                    VALUES (:sku, :variant_id, :inventory_item_id, :title, :updated_at)
                     ON CONFLICT (sku) DO UPDATE
                     SET variant_id = EXCLUDED.variant_id,
                         inventory_item_id = EXCLUDED.inventory_item_id,
+                        title = EXCLUDED.title,
                         updated_at = EXCLUDED.updated_at
                     """
                 ),
@@ -308,6 +321,7 @@ def upsert_variant_map(engine: Engine, entries: Iterable[tuple[str, VariantInfo]
                     "sku": sku,
                     "variant_id": info.variant_id,
                     "inventory_item_id": info.inventory_item_id,
+                    "title": info.title,
                     "updated_at": now,
                 },
             )

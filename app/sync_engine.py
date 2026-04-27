@@ -82,7 +82,13 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             logger.info("Shopify snapshot rows=%s", shopify_rows)
             db.upsert_variant_map(
                 engine,
-                [(item.sku, db.VariantInfo(item.variant_id, item.inventory_item_id)) for item in snapshot],
+                [
+                    (
+                        item.sku,
+                        db.VariantInfo(item.variant_id, item.inventory_item_id, getattr(item, 'title', None)),
+                    )
+                    for item in snapshot
+                ],
             )
 
             shopify_map = _normalize_snapshot(snapshot)

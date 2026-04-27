@@ -28,6 +28,7 @@ class ShopifyVariantSnapshot:
     inventory_item_id: str
     price: float
     quantity: Optional[int]
+    title: Optional[str] = None
 
 
 class ShopifyClient:
@@ -202,6 +203,7 @@ class ShopifyClient:
                         price
                         product {
                             id
+                            title
                         }
                         inventoryItem {
                             id
@@ -232,7 +234,9 @@ class ShopifyClient:
             for node in nodes:
                 sku = normalize_sku(node.get("sku"))
                 variant_id = node.get("id")
-                product_id = (node.get("product") or {}).get("id")
+                product_data = node.get("product") or {}
+                product_id = product_data.get("id")
+                product_title = product_data.get("title")
                 inventory_item = node.get("inventoryItem") or {}
                 inventory_item_id = inventory_item.get("id")
                 inventory_levels = inventory_item.get("inventoryLevels", {}).get("edges", [])
@@ -272,6 +276,7 @@ class ShopifyClient:
                         inventory_item_id=inventory_item_id,
                         price=price,
                         quantity=quantity,
+                        title=product_title,
                     )
                 )
             page_info = payload.get("pageInfo", {})
