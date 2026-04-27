@@ -11,7 +11,7 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 @router.get("/skus/mismatches")
 @log_endpoint_errors
 async def sku_mismatches(
-    type: str = Query("all", pattern=r"^(ddvc_only|shopify_only|all)$"),
+    type: str = Query("all", pattern=r"^(ddvc_only|shopify_only|discontinued|all)$"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
 ):
@@ -52,6 +52,23 @@ async def sku_mismatches(
         """
         total = await pool.fetchval(count_sql)
         rows = await pool.fetch(query_sql, per_page, offset)
+    elif type == "discontinued":
+        count_sql = """
+            SELECT COUNT(*) FROM sku_state ss
+            JOIN shopify_variants sv ON sv.sku = ss.sku
+            WHERE ss.last_sync_status = 'discontinued'
+        """
+        query_sql = """
+            SELECT ss.sku, 'discontinued' as mismatch_type,
+                   ss.ddvc_salable, ss.ddvc_price, ss.last_seen_ddvc_at as updated_at
+            FROM sku_state ss
+            JOIN shopify_variants sv ON sv.sku = ss.sku
+            WHERE ss.last_sync_status = 'discontinued'
+            ORDER BY ss.sku
+            LIMIT $1 OFFSET $2
+        """
+        total = await pool.fetchval(count_sql)
+        rows = await pool.fetch(query_sql, per_page, offset)
     else:
         count_sql = """
             SELECT (
@@ -62,6 +79,10 @@ async def sku_mismatches(
                 SELECT COUNT(*) FROM shopify_variants sv
                 LEFT JOIN sku_state ss ON ss.sku = sv.sku
                 WHERE ss.sku IS NULL
+            ) + (
+                SELECT COUNT(*) FROM sku_state ss
+                JOIN shopify_variants sv ON sv.sku = ss.sku
+                WHERE ss.last_sync_status = 'discontinued'
             )
         """
         query_sql = """
@@ -75,6 +96,11 @@ async def sku_mismatches(
                 FROM shopify_variants sv
                 LEFT JOIN sku_state ss ON ss.sku = sv.sku
                 WHERE ss.sku IS NULL
+                UNION ALL
+                SELECT ss.sku, 'discontinued' as mismatch_type, ss.last_seen_ddvc_at as updated_at
+                FROM sku_state ss
+                JOIN shopify_variants sv ON sv.sku = ss.sku
+                WHERE ss.last_sync_status = 'discontinued'
             ) combined
             ORDER BY sku
             LIMIT $1 OFFSET $2
@@ -83,6 +109,51 @@ async def sku_mismatches(
         rows = await pool.fetch(query_sql, per_page, offset)
 
     items = [dict(r) for r in rows]
+    return {"total": total, "page": page, "per_page": per_page, "items": items}
+
+
+@router.get("/skus/discontinued")
+@log_endpoint_errors
+async def sku_discontinued(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+):
+    """
+    Lista SKUs que están en Shopify pero fueron confirmados como
+    inexistentes en DDVC (last_sync_status = 'discontinued').
+    Incluye precio actual de Shopify, último precio DDVC conocido,
+    y fecha de última vez visto en DDVC.
+    """
+    pool = await get_pool()
+    offset = (page - 1) * per_page
+
+    count_sql = """
+        SELECT COUNT(*) FROM sku_state ss
+        JOIN shopify_variants sv ON sv.sku = ss.sku
+        WHERE ss.last_sync_status = 'discontinued'
+    """
+    total = await pool.fetchval(count_sql)
+
+    query_sql = """
+        SELECT
+            ss.sku,
+            ss.ddvc_salable,
+            ss.ddvc_price,
+            ss.target_qty,
+            ss.last_seen_ddvc_at,
+            ss.last_sync_status,
+            ss.updated_at,
+            sv.variant_id,
+            sv.inventory_item_id
+        FROM sku_state ss
+        JOIN shopify_variants sv ON sv.sku = ss.sku
+        WHERE ss.last_sync_status = 'discontinued'
+        ORDER BY ss.updated_at DESC
+        LIMIT $1 OFFSET $2
+    """
+    rows = await pool.fetch(query_sql, per_page, offset)
+    items = [dict(r) for r in rows]
+
     return {"total": total, "page": page, "per_page": per_page, "items": items}
 
 
