@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 
 from app import db
 from app.config import Settings
-from app.ddvc_full import DDVCFetchIntegrityError, fetch_ddvc_full, validar_sku_directo
+from app.ddvc_full import DDVCFetchIntegrityError, fetch_ddvc_full
 from app.pricing import PricingEngine, load_sku_exemptions, log_price_change
 from app.shopify_client import ShopifyClient, ShopifyVariantSnapshot
 from app.sku_utils import normalize_sku
@@ -128,11 +128,11 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             }))
 
             sku_states = db.load_sku_states(engine)
-            fallback_validation_cache: Dict[str, tuple[Optional[bool], Optional[bool]]] = {}
             inventory_updates: List[Tuple[str, int]] = []
             price_updates: List[Tuple[str, str, float]] = []
             inventory_actions: List[Tuple[int, str, str, int]] = []
             price_actions: List[Tuple[int, str, str, float]] = []
+            pending_validation: List[str] = []
             sku_status: Dict[str, Dict[str, bool]] = {}
             desired_state: Dict[str, Dict[str, Optional[float | bool | dt.datetime]]] = {}
 
@@ -184,54 +184,11 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                         qty_target = settings.in_stock_qty
                     last_seen = dt.datetime.now(dt.timezone.utc)
                 else:
-                    exists, fallback_is_salable = validar_sku_directo(
-                        graphql_url=settings.ddvc_graphql,
-                        sku=sku_norm,
-                        cache=fallback_validation_cache,
-                    )
-                    ddvc_price = None
-                    stock_status = None
-                    if exists is True:
-                        found_count += 1
-                        is_salable = fallback_is_salable
-                        if is_salable is True:
-                            qty_target = settings.in_stock_qty
-                        elif is_salable is False:
-                            qty_target = settings.out_of_stock_qty
-                        else:
-                            qty_target = shopify_item.quantity
-                            logger.warning(
-                                "SKU %s validated by fallback (exists) but is_salable is null; preserving inventory=%s",
-                                sku_norm,
-                                _stringify(shopify_item.quantity),
-                            )
-                        last_seen = dt.datetime.now(dt.timezone.utc)
-                        logger.info(
-                            "SKU %s validated by fallback (exists=%s, is_salable=%s) qty_target=%s",
-                            sku_norm,
-                            exists,
-                            is_salable,
-                            _stringify(qty_target),
-                        )
-                    elif exists is False:
-                        not_found_count += 1
-                        is_salable = None
-                        qty_target = settings.out_of_stock_qty
-                        last_seen = None
-                        logger.info(
-                            "SKU %s confirmed missing by fallback; setting inventory to out_of_stock_qty=%s",
-                            sku_norm,
-                            settings.out_of_stock_qty,
-                        )
-                    else:
-                        is_salable = None
-                        qty_target = shopify_item.quantity
-                        last_seen = None
-                        logger.error(
-                            "SKU %s fallback validation error; preserving current inventory=%s (fail-safe)",
-                            sku_norm,
-                            _stringify(shopify_item.quantity),
-                        )
+                    # SKU no está en el fetch completo de DDVC.
+                    # No hacer validación individual aquí — se hará en batch después.
+                    # Por ahora, marcar como pendiente de validación.
+                    pending_validation.append(sku_norm)
+                    continue  # Saltar este SKU por ahora, se procesa en Fase 2
 
                 desired_state[sku_norm] = {
                     "ddvc_salable": is_salable,
@@ -340,6 +297,123 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                         skipped_count += 1
                     else:
                         skipped_count += 1
+
+            # ── FASE 2: Batch validation de SKUs no encontrados en DDVC ──
+            if pending_validation:
+                from app.ddvc_full import validar_skus_batch
+
+                logger.info("Starting batch validation for %s SKUs not in DDVC full fetch", len(pending_validation))
+
+                batch_results = validar_skus_batch(
+                    graphql_url=settings.ddvc_graphql,
+                    skus=pending_validation,
+                )
+
+                batch_found = 0
+                batch_not_found = 0
+
+                for sku_norm in pending_validation:
+                    shopify_item = shopify_map[sku_norm]
+
+                    # Check exemptions
+                    exemption = sku_exemptions.get(sku_norm, {})
+                    exempt_inventory = exemption.get("exempt_inventory", False)
+                    exempt_price = exemption.get("exempt_price", False)
+
+                    batch_item = batch_results.get(sku_norm)
+
+                    if batch_item:
+                        # Encontrado en batch — procesar normalmente
+                        batch_found += 1
+                        found_count += 1
+                        is_salable = batch_item.get("is_salable")
+                        stock_status = batch_item.get("stock_status")
+                        ddvc_price_raw = batch_item.get("final_price")
+                        ddvc_price = None
+                        if ddvc_price_raw is not None:
+                            try:
+                                ddvc_price = float(ddvc_price_raw)
+                            except (TypeError, ValueError):
+                                pass
+
+                        # Misma lógica de disponibilidad que Fase 1
+                        stock_status_norm = (stock_status or "").upper() if isinstance(stock_status, str) else None
+                        available = stock_status_norm == "IN_STOCK" or is_salable is True
+                        explicit_oos = stock_status_norm == "OUT_OF_STOCK" or is_salable is False
+
+                        if available:
+                            qty_target = settings.in_stock_qty
+                        elif explicit_oos:
+                            qty_target = settings.out_of_stock_qty
+                        else:
+                            qty_target = settings.in_stock_qty  # Existe en DDVC, asumir disponible
+
+                        last_seen = dt.datetime.now(dt.timezone.utc)
+                    else:
+                        # No encontrado ni en batch — realmente no existe en DDVC
+                        batch_not_found += 1
+                        not_found_count += 1
+                        is_salable = None
+                        ddvc_price = None
+                        qty_target = settings.out_of_stock_qty
+                        last_seen = None
+
+                    desired_state[sku_norm] = {
+                        "ddvc_salable": is_salable,
+                        "ddvc_price": ddvc_price,
+                        "target_qty": float(qty_target) if qty_target is not None else None,
+                        "last_seen_ddvc_at": last_seen,
+                    }
+
+                    sku_status[sku_norm] = {
+                        "inventory_needed": False,
+                        "price_needed": False,
+                        "inventory_success": True,
+                        "price_success": True,
+                    }
+
+                    # Comparar inventario
+                    qty_needs_update = shopify_item.quantity != qty_target
+                    if qty_needs_update and not exempt_inventory:
+                        action_id = db.insert_sync_action(
+                            engine, run_id=run_id, sku_norm=sku_norm,
+                            action_type="inventory",
+                            old_value=_stringify(shopify_item.quantity),
+                            new_value=_stringify(qty_target),
+                            status="planned",
+                        )
+                        inventory_actions.append((action_id, sku_norm, shopify_item.inventory_item_id, qty_target))
+                        inventory_updates.append((shopify_item.inventory_item_id, qty_target))
+                        sku_status[sku_norm]["inventory_needed"] = True
+                        sku_status[sku_norm]["inventory_success"] = False
+                        logger.info("SKU %s (batch) inventory %s -> %s", sku_norm,
+                                    _stringify(shopify_item.quantity), _stringify(qty_target))
+
+                    # Comparar precio (solo si encontrado en batch con precio)
+                    if ddvc_price is not None and not exempt_price:
+                        price_result = pricing_engine.calculate(sku_norm, ddvc_price)
+                        target_price = price_result.final_price
+                        if abs(shopify_item.price - target_price) > 0.01:
+                            rule_desc = " + ".join(price_result.steps[1:]) if len(price_result.steps) > 1 else "Sin regla"
+                            action_id = db.insert_sync_action(
+                                engine, run_id=run_id, sku_norm=sku_norm,
+                                action_type="price",
+                                old_value=_stringify(shopify_item.price),
+                                new_value=_stringify(target_price),
+                                status="planned",
+                            )
+                            price_actions.append((action_id, sku_norm, shopify_item.variant_id, target_price))
+                            price_updates.append((shopify_item.product_id, shopify_item.variant_id, target_price))
+                            sku_status[sku_norm]["price_needed"] = True
+                            sku_status[sku_norm]["price_success"] = False
+                            log_price_change(engine, sku=sku_norm, ddvc_price=ddvc_price,
+                                             rule_applied=rule_desc, price_before=shopify_item.price,
+                                             price_after=target_price, was_applied=False)
+
+                logger.info(
+                    "Batch validation results: pending=%s found=%s not_found=%s",
+                    len(pending_validation), batch_found, batch_not_found
+                )
 
             inventory_changes = len(inventory_actions)
             price_changes = len(price_actions)

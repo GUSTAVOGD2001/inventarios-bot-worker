@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import requests
 
@@ -258,7 +258,6 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
         raise DDVCFetchIntegrityError(
             f"DDVC total_count mismatch: expected={total_count} fetched={fetched_items_count} diff={diff}"
         )
-
     logger.info("DDVC full fetch done rows=%s pages=%s", len(results), total_pages)
     logger.info(
         "DDVC full fetch summary ok_pages=%s fail_pages=%s elapsed=%.2fs",
@@ -272,6 +271,85 @@ def fetch_ddvc_full(graphql_url: str) -> Dict[str, Dict[str, Optional[float]]]:
         regular_price_count,
         final_price_only_count,
     )
+    return results
+
+
+def validar_skus_batch(
+    graphql_url: str,
+    skus: List[str],
+    chunk_size: int = 150,
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """
+    Consulta múltiples SKUs en batch usando el filtro { sku: { in: [...] } }.
+    Retorna un dict con los SKUs encontrados y sus datos (mismo formato que fetch_ddvc_full).
+    Los SKUs no encontrados simplemente no aparecen en el resultado.
+    """
+    from app.sku_utils import normalize_sku
+
+    timeout = float(os.getenv("DDVC_TIMEOUT", "90"))
+    sleep_seconds = float(os.getenv("DDVC_SLEEP_SECONDS", "0.35"))
+
+    # Normalizar y deduplicar
+    normalized = list({normalize_sku(s) for s in skus if normalize_sku(s)})
+    if not normalized:
+        return {}
+
+    results: Dict[str, Dict[str, Optional[float]]] = {}
+    chunks = [normalized[i:i + chunk_size] for i in range(0, len(normalized), chunk_size)]
+
+    logger.info("Batch validating %s SKUs in %s chunks", len(normalized), len(chunks))
+
+    BATCH_QUERY = """
+    query ($skus: [String!]) {
+        products(filter: { sku: { in: $skus } }, pageSize: 200) {
+            items {
+                sku
+                is_salable
+                price_range {
+                    minimum_price {
+                        regular_price { value }
+                        final_price { value }
+                    }
+                }
+            }
+        }
+    }
+    """
+
+    for idx, chunk in enumerate(chunks):
+        for attempt in range(3):
+            try:
+                payload = gql(graphql_url, BATCH_QUERY, {"skus": chunk}, timeout)
+                items = payload.get("data", {}).get("products", {}).get("items") or []
+                for item in items:
+                    if not item:
+                        continue
+                    sku = normalize_sku(item.get("sku"))
+                    if not sku:
+                        continue
+                    min_price = item.get("price_range", {}).get("minimum_price", {})
+                    regular_price = min_price.get("regular_price", {}).get("value")
+                    final_price = min_price.get("final_price", {}).get("value")
+                    results[sku] = {
+                        "is_salable": item.get("is_salable"),
+                        "stock_status": item.get("stock_status"),
+                        "regular_price": regular_price,
+                        "final_price": final_price,
+                    }
+                logger.info(
+                    "Batch chunk %s/%s: sent=%s found=%s",
+                    idx + 1, len(chunks), len(chunk), len([s for s in chunk if s in results])
+                )
+                break
+            except Exception as exc:
+                if attempt >= 2:
+                    logger.error("Batch validation chunk %s failed after retries: %s", idx, exc)
+                else:
+                    logger.warning("Batch validation chunk %s attempt %s failed: %s", idx, attempt + 1, exc)
+                    if sleep_seconds > 0:
+                        time.sleep(sleep_seconds)
+
+    logger.info("Batch validation complete: %s/%s SKUs found", len(results), len(normalized))
     return results
 
 
