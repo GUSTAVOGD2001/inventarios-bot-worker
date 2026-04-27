@@ -57,6 +57,9 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
         price_changes = 0
         ddvc_rows = 0
         shopify_rows = 0
+        batch_validated_count = 0
+        batch_found_count = 0
+        batch_not_found_count = 0
         applied_to_zero = 0
         applied_to_in_stock = 0
         applied_price_changes = 0
@@ -134,7 +137,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
             price_actions: List[Tuple[int, str, str, float]] = []
             pending_validation: List[str] = []
             sku_status: Dict[str, Dict[str, bool]] = {}
-            desired_state: Dict[str, Dict[str, Optional[float | bool | dt.datetime]]] = {}
+            desired_state: Dict[str, Dict[str, Optional[float | bool | str | dt.datetime]]] = {}
 
             for sku_norm, shopify_item in shopify_map.items():
                 planned_action = False
@@ -309,8 +312,9 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     skus=pending_validation,
                 )
 
-                batch_found = 0
-                batch_not_found = 0
+                batch_validated_count = len(pending_validation)
+                batch_found_count = 0
+                batch_not_found_count = 0
 
                 for sku_norm in pending_validation:
                     shopify_item = shopify_map[sku_norm]
@@ -324,7 +328,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
 
                     if batch_item:
                         # Encontrado en batch — procesar normalmente
-                        batch_found += 1
+                        batch_found_count += 1
                         found_count += 1
                         is_salable = batch_item.get("is_salable")
                         stock_status = batch_item.get("stock_status")
@@ -351,7 +355,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                         last_seen = dt.datetime.now(dt.timezone.utc)
                     else:
                         # No encontrado ni en batch — realmente no existe en DDVC
-                        batch_not_found += 1
+                        batch_not_found_count += 1
                         not_found_count += 1
                         is_salable = None
                         ddvc_price = None
@@ -364,6 +368,8 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                         "target_qty": float(qty_target) if qty_target is not None else None,
                         "last_seen_ddvc_at": last_seen,
                     }
+                    if batch_item is None:
+                        desired_state[sku_norm]["last_sync_status_override"] = "discontinued"
 
                     sku_status[sku_norm] = {
                         "inventory_needed": False,
@@ -412,7 +418,7 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
 
                 logger.info(
                     "Batch validation results: pending=%s found=%s not_found=%s",
-                    len(pending_validation), batch_found, batch_not_found
+                    len(pending_validation), batch_found_count, batch_not_found_count
                 )
 
             inventory_changes = len(inventory_actions)
@@ -594,7 +600,10 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     ddvc_price=ddvc_price if isinstance(ddvc_price, (float, int)) or ddvc_price is None else None,
                     target_qty=target_qty if isinstance(target_qty, (float, int)) or target_qty is None else None,
                     last_seen_ddvc_at=last_seen_ddvc_at if isinstance(last_seen_ddvc_at, dt.datetime) else None,
-                    last_sync_status="applied" if status and (status["inventory_needed"] or status["price_needed"]) else "noop",
+                    last_sync_status=desired.get(
+                        "last_sync_status_override",
+                        "applied" if status and (status["inventory_needed"] or status["price_needed"]) else "noop",
+                    ),
                 )
 
             # ── Registrar SKUs que están en DDVC pero no en Shopify ──
@@ -645,6 +654,9 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                     ddvc_rows=ddvc_rows,
                     shopify_rows=shopify_rows,
                     error=error_message,
+                    batch_validated=batch_validated_count,
+                    batch_confirmed=batch_found_count,
+                    batch_not_found=batch_not_found_count,
                 )
             db.set_kv(engine, "sync_progress", json.dumps({
                 "run_id": run_id,
