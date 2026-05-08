@@ -62,6 +62,22 @@ class SkuOverrideUpdate(BaseModel):
     notes: str | None = None
 
 
+
+
+class SkuPrefixOverrideCreate(BaseModel):
+    sku_prefix: str = Field(..., max_length=50, min_length=1)
+    override_type: str = Field(..., pattern=r"^(fixed_price|percentage|fixed_amount)$")
+    value: float
+    is_active: bool = True
+    notes: str | None = None
+
+
+class SkuPrefixOverrideUpdate(BaseModel):
+    sku_prefix: str | None = Field(None, max_length=50)
+    override_type: str | None = Field(None, pattern=r"^(fixed_price|percentage|fixed_amount)$")
+    value: float | None = None
+    is_active: bool | None = None
+    notes: str | None = None
 class SkuOverrideOut(BaseModel):
     id: int
     sku: str

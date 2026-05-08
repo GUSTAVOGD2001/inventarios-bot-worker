@@ -8,6 +8,8 @@ from ..models import (
     SimulateRequest,
     SkuOverrideCreate,
     SkuOverrideUpdate,
+    SkuPrefixOverrideCreate,
+    SkuPrefixOverrideUpdate,
 )
 from ..pricing_engine import calculate_final_price
 
@@ -185,3 +187,95 @@ async def simulate_pricing(body: SimulateRequest):
         results.append(calc)
 
     return {"items": results}
+
+
+@router.get("/pricing/prefix-overrides")
+async def list_prefix_overrides(
+    prefix: str | None = None,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+):
+    pool = await get_pool()
+    conditions = []
+    params: list = []
+    idx = 1
+
+    if prefix:
+        conditions.append(f"sku_prefix ILIKE ${idx}")
+        params.append(f"%{prefix}%")
+        idx += 1
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    total = await pool.fetchval(f"SELECT COUNT(*) FROM sku_prefix_overrides {where}", *params)
+
+    offset = (page - 1) * per_page
+    params.extend([per_page, offset])
+    rows = await pool.fetch(
+        f"SELECT * FROM sku_prefix_overrides {where} ORDER BY sku_prefix LIMIT ${idx} OFFSET ${idx + 1}",
+        *params,
+    )
+
+    items = []
+    for r in rows:
+        item = dict(r)
+        item["affected_count"] = await pool.fetchval(
+            "SELECT COUNT(*) FROM sku_state WHERE sku LIKE $1 || '%'",
+            item["sku_prefix"],
+        )
+        items.append(item)
+    return {"total": total, "page": page, "per_page": per_page, "items": items}
+
+
+@router.post("/pricing/prefix-overrides", status_code=201)
+async def create_prefix_override(body: SkuPrefixOverrideCreate):
+    pool = await get_pool()
+    sku_prefix = body.sku_prefix.strip().upper()
+    try:
+        row = await pool.fetchrow(
+            """INSERT INTO sku_prefix_overrides (sku_prefix, override_type, value, is_active, notes)
+               VALUES ($1, $2, $3, $4, $5) RETURNING *""",
+            sku_prefix, body.override_type, body.value, body.is_active, body.notes,
+        )
+    except Exception as e:
+        if "unique" in str(e).lower():
+            raise HTTPException(status_code=409, detail=f"Override for prefix '{sku_prefix}' already exists")
+        raise
+    return dict(row)
+
+
+@router.put("/pricing/prefix-overrides/{override_id}")
+async def update_prefix_override(override_id: int, body: SkuPrefixOverrideUpdate):
+    pool = await get_pool()
+    existing = await pool.fetchrow("SELECT * FROM sku_prefix_overrides WHERE id = $1", override_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Prefix override not found")
+
+    fields = []
+    params = []
+    idx = 1
+    data = body.model_dump()
+    if data.get("sku_prefix") is not None:
+        data["sku_prefix"] = data["sku_prefix"].strip().upper()
+
+    for field_name in ("sku_prefix", "override_type", "value", "is_active", "notes"):
+        val = data.get(field_name)
+        if val is not None:
+            fields.append(f"{field_name} = ${idx}")
+            params.append(val)
+            idx += 1
+    if not fields:
+        return dict(existing)
+
+    fields.append("updated_at = now()")
+    params.append(override_id)
+    sql = f"UPDATE sku_prefix_overrides SET {', '.join(fields)} WHERE id = ${idx} RETURNING *"
+    row = await pool.fetchrow(sql, *params)
+    return dict(row)
+
+
+@router.delete("/pricing/prefix-overrides/{override_id}", status_code=204)
+async def delete_prefix_override(override_id: int):
+    pool = await get_pool()
+    result = await pool.execute("DELETE FROM sku_prefix_overrides WHERE id = $1", override_id)
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Prefix override not found")
