@@ -98,6 +98,25 @@ def _load_overrides(engine: Engine) -> Dict[str, dict]:
     return {row[0].strip().upper(): {"override_type": row[1], "value": float(row[2])} for row in rows}
 
 
+def _load_prefix_overrides(engine: Engine) -> List[dict]:
+    """Carga todos los prefix overrides activos ordenados por longitud DESC."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT sku_prefix, override_type, value FROM sku_prefix_overrides "
+                "WHERE is_active = true ORDER BY LENGTH(sku_prefix) DESC"
+            )
+        ).fetchall()
+    return [
+        {
+            "sku_prefix": row[0].strip().upper(),
+            "override_type": row[1],
+            "value": float(row[2]),
+        }
+        for row in rows
+    ]
+
+
 def _load_global_rule(engine: Engine) -> Optional[dict]:
     """Carga la regla global de mayor prioridad."""
     with engine.connect() as conn:
@@ -121,6 +140,7 @@ class PricingEngine:
     def __init__(self, engine: Engine):
         self.engine = engine
         self.overrides: Dict[str, dict] = {}
+        self.prefix_overrides: List[dict] = []
         self.global_rule: Optional[dict] = None
         self.rounding_enabled: bool = False
         self.rounding_threshold: float = 200.0
@@ -129,11 +149,14 @@ class PricingEngine:
         self.global_markup_enabled: bool = True
         self.price_cap_enabled: bool = True
         self.price_cap_max: float = 10000.0
+        self.price_cap_rounding_enabled: bool = False
+        self.price_cap_rounding_discount: float = 0.10
 
     def load_rules(self) -> None:
         """Llamar una vez al inicio de cada sync run."""
         # Defaults seguros
         self.overrides = {}
+        self.prefix_overrides = []
         self.global_rule = None
         self.rounding_enabled = False
         self.rounding_threshold = 200.0
@@ -142,6 +165,8 @@ class PricingEngine:
         self.global_markup_enabled = True
         self.price_cap_enabled = True
         self.price_cap_max = 10000.0
+        self.price_cap_rounding_enabled = False
+        self.price_cap_rounding_discount = 0.10
 
         # 1. Overrides
         try:
@@ -149,6 +174,12 @@ class PricingEngine:
             logger.info("Loaded %s SKU overrides", len(self.overrides))
         except Exception as exc:
             logger.error("Failed to load sku_overrides: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        try:
+            self.prefix_overrides = _load_prefix_overrides(self.engine)
+            logger.info("Loaded %s prefix overrides", len(self.prefix_overrides))
+        except Exception as exc:
+            logger.error("Failed to load sku_prefix_overrides: %s", exc, exc_info=True)
 
         # 2. Global rule
         try:
@@ -201,9 +232,22 @@ class PricingEngine:
         except Exception as exc:
             logger.error("Failed to load price_cap_max: %s: %s", type(exc).__name__, str(exc), exc_info=True)
 
+        try:
+            cap_rounding_enabled_val = _get_setting(self.engine, "price_cap_rounding_enabled")
+            self.price_cap_rounding_enabled = bool(cap_rounding_enabled_val) if cap_rounding_enabled_val is not None else False
+        except Exception as exc:
+            logger.error("Failed to load price_cap_rounding_enabled: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
+        try:
+            cap_rounding_discount_val = _get_setting(self.engine, "price_cap_rounding_discount")
+            self.price_cap_rounding_discount = float(cap_rounding_discount_val) if cap_rounding_discount_val is not None else 0.10
+        except Exception as exc:
+            logger.error("Failed to load price_cap_rounding_discount: %s: %s", type(exc).__name__, str(exc), exc_info=True)
+
         logger.info(
-            "Pricing rules FINAL: overrides=%s global_rule=%s rounding=%s threshold=%s low=%s high=%s markup_enabled=%s price_cap_enabled=%s price_cap_max=%s",
+            "Pricing rules FINAL: overrides=%s prefix_overrides=%s global_rule=%s rounding=%s threshold=%s low=%s high=%s markup_enabled=%s price_cap_enabled=%s price_cap_max=%s price_cap_rounding_enabled=%s price_cap_rounding_discount=%s",
             len(self.overrides),
+            len(self.prefix_overrides),
             self.global_rule["name"] if self.global_rule else "none",
             self.rounding_enabled,
             self.rounding_threshold,
@@ -212,6 +256,8 @@ class PricingEngine:
             self.global_markup_enabled,
             self.price_cap_enabled,
             self.price_cap_max,
+            self.price_cap_rounding_enabled,
+            self.price_cap_rounding_discount,
         )
 
     def calculate(self, sku_norm: str, ddvc_price: float) -> PriceResult:
@@ -232,18 +278,26 @@ class PricingEngine:
 
         # Step 1: Check SKU override
         override = self.overrides.get(sku_norm)
+        override_source = "exact" if override else None
+        if not override:
+            for po in self.prefix_overrides:
+                if sku_norm.startswith(po["sku_prefix"]):
+                    override = {"override_type": po["override_type"], "value": po["value"]}
+                    override_source = f"prefix:{po['sku_prefix']}"
+                    break
         if override:
             otype = override["override_type"]
             oval = override["value"]
+            source_label = f"Override (prefix {override_source.split(':')[1]})" if override_source and override_source.startswith("prefix:") else "Override"
             if otype == "fixed_price":
-                steps.append(f"Override precio fijo: ${oval:.2f}")
+                steps.append(f"{source_label} precio fijo: ${oval:.2f}")
                 margin = oval - ddvc_price
                 pct = (margin / ddvc_price * 100) if ddvc_price else 0
                 return PriceResult(
                     sku=sku_norm,
                     ddvc_price=ddvc_price,
                     final_price=oval,
-                    override_applied=f"fixed_price: ${oval:.2f}",
+                    override_applied=f"fixed_price ({source_label}): ${oval:.2f}",
                     global_rule_applied=None,
                     rounding_applied=False,
                     steps=steps,
@@ -252,31 +306,43 @@ class PricingEngine:
                 )
             elif otype == "percentage":
                 price = ddvc_price * (1 + oval / 100)
-                override_applied = f"percentage: +{oval}%"
-                steps.append(f"Override +{oval}%: ${price:.2f}")
+                override_applied = f"{source_label} +{oval}%"
+                steps.append(f"{source_label} +{oval}%: ${price:.2f}")
             elif otype == "fixed_amount":
                 price = ddvc_price + oval
-                override_applied = f"fixed_amount: +${oval:.2f}"
-                steps.append(f"Override +${oval:.2f}: ${price:.2f}")
+                override_applied = f"{source_label} +${oval:.2f}"
+                steps.append(f"{source_label} +${oval:.2f}: ${price:.2f}")
         else:
             # Step 1b: Price cap check (solo cuando NO hay override)
             # Productos arriba del cap se dejan al precio DDVC tal cual:
             # no markup global ni redondeo. Los overrides ignoran este límite.
             if self.price_cap_enabled and ddvc_price > self.price_cap_max:
-                steps.append(
-                    f"Price cap: ${ddvc_price:.2f} > ${self.price_cap_max:.2f}, "
-                    f"saltando markup y redondeo"
-                )
+                cap_price = ddvc_price
+                cap_rounding = False
+                if self.price_cap_rounding_enabled:
+                    cap_price = round(ddvc_price - self.price_cap_rounding_discount, 2)
+                    cap_rounding = True
+                    steps.append(
+                        f"Price cap: ${ddvc_price:.2f} > ${self.price_cap_max:.2f}, "
+                        f"sin markup. Redondeo cap -${self.price_cap_rounding_discount:.2f}: ${cap_price:.2f}"
+                    )
+                else:
+                    steps.append(
+                        f"Price cap: ${ddvc_price:.2f} > ${self.price_cap_max:.2f}, "
+                        f"saltando markup y redondeo"
+                    )
+                margin = cap_price - ddvc_price
+                pct = (margin / ddvc_price * 100) if ddvc_price else 0
                 return PriceResult(
                     sku=sku_norm,
                     ddvc_price=ddvc_price,
-                    final_price=ddvc_price,
+                    final_price=cap_price,
                     override_applied=None,
                     global_rule_applied="price_cap_skip",
-                    rounding_applied=False,
+                    rounding_applied=cap_rounding,
                     steps=steps,
-                    margin_amount=0.0,
-                    margin_percent=0.0,
+                    margin_amount=round(margin, 2),
+                    margin_percent=round(pct, 2),
                 )
 
             # Step 2: Global rule (solo si no hay override y markup está habilitado)

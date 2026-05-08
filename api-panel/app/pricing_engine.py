@@ -22,21 +22,15 @@ async def calculate_final_price(
     *,
     preview_rules: dict | None = None,
 ) -> dict:
-    """
-    Calculate final price through the full pricing pipeline.
-
-    If preview_rules is provided, uses those instead of DB rules:
-        preview_rules = {"global_markup": 5.0, "rounding_enabled": True}
-    """
     steps: list[str] = []
     override_applied: str | None = None
     global_rule_applied: str | None = None
     rounding_applied = False
     price = ddvc_price
 
+    sku = sku.strip().upper()
     steps.append(f"Base: ${ddvc_price:.2f}")
 
-    # --- Step 1: Check SKU override ---
     if preview_rules is None:
         override = await pool.fetchrow(
             "SELECT override_type, value FROM sku_overrides WHERE sku = $1 AND is_active = true",
@@ -45,13 +39,25 @@ async def calculate_final_price(
     else:
         override = None
 
+    override_source = "exact" if override else None
+    if not override and preview_rules is None:
+        prefix_row = await pool.fetchrow(
+            """SELECT sku_prefix, override_type, value FROM sku_prefix_overrides
+               WHERE is_active = true AND $1 LIKE sku_prefix || '%'
+               ORDER BY LENGTH(sku_prefix) DESC LIMIT 1""",
+            sku,
+        )
+        if prefix_row:
+            override = {"override_type": prefix_row["override_type"], "value": float(prefix_row["value"])}
+            override_source = f"prefix:{prefix_row['sku_prefix']}"
+
     if override:
         otype = override["override_type"]
         oval = float(override["value"])
+        source_label = f"Override (prefix {override_source.split(':')[1]})" if override_source and override_source.startswith("prefix:") else "Override"
         if otype == "fixed_price":
-            # Fixed price exits immediately, skips rounding
-            override_applied = f"fixed_price: ${oval:.2f}"
-            steps.append(f"Override fixed_price: ${oval:.2f}")
+            override_applied = f"fixed_price ({source_label}): ${oval:.2f}"
+            steps.append(f"{source_label} fixed_price: ${oval:.2f}")
             margin_amount = oval - ddvc_price
             margin_pct = (margin_amount / ddvc_price * 100) if ddvc_price else 0
             return {
@@ -68,14 +74,48 @@ async def calculate_final_price(
             }
         elif otype == "percentage":
             price = ddvc_price * (1 + oval / 100)
-            override_applied = f"percentage: +{oval}%"
-            steps.append(f"Override +{oval}%: ${price:.2f}")
+            override_applied = f"{source_label} +{oval}%"
+            steps.append(f"{source_label} +{oval}%: ${price:.2f}")
         elif otype == "fixed_amount":
             price = ddvc_price + oval
-            override_applied = f"fixed_amount: +${oval:.2f}"
-            steps.append(f"Override +${oval:.2f}: ${price:.2f}")
+            override_applied = f"{source_label} +${oval:.2f}"
+            steps.append(f"{source_label} +${oval:.2f}: ${price:.2f}")
     else:
-        # --- Step 2: Global pricing rule ---
+        if preview_rules is not None:
+            cap_enabled = preview_rules.get("price_cap_enabled", True)
+            cap_max = preview_rules.get("price_cap_max", 10000)
+        else:
+            cap_enabled_val = await _get_setting(pool, "price_cap_enabled")
+            cap_max_val = await _get_setting(pool, "price_cap_max")
+            cap_enabled = bool(cap_enabled_val) if cap_enabled_val is not None else True
+            cap_max = float(cap_max_val) if cap_max_val is not None else 10000.0
+
+        if cap_enabled and ddvc_price > cap_max:
+            cap_rounding_val = await _get_setting(pool, "price_cap_rounding_enabled")
+            cap_rounding_enabled = bool(cap_rounding_val) if cap_rounding_val is not None else False
+            cap_discount_val = await _get_setting(pool, "price_cap_rounding_discount")
+            cap_discount = float(cap_discount_val) if cap_discount_val is not None else 0.10
+
+            cap_price = ddvc_price
+            cap_rounding = False
+            if cap_rounding_enabled:
+                cap_price = round(ddvc_price - cap_discount, 2)
+                cap_rounding = True
+                steps.append(f"Price cap: ${ddvc_price:.2f} > ${cap_max:.2f}, sin markup. Redondeo cap -${cap_discount:.2f}: ${cap_price:.2f}")
+            else:
+                steps.append(f"Price cap: ${ddvc_price:.2f} > ${cap_max:.2f}, saltando markup y redondeo")
+
+            margin_amount = cap_price - ddvc_price
+            margin_pct = (margin_amount / ddvc_price * 100) if ddvc_price else 0
+            return {
+                "sku": sku, "ddvc_price": ddvc_price,
+                "override_applied": None, "global_rule_applied": "price_cap_skip",
+                "after_rules": cap_price, "rounding_applied": cap_rounding,
+                "final_price": cap_price,
+                "margin_amount": round(margin_amount, 2), "margin_percent": round(margin_pct, 2),
+                "steps": steps,
+            }
+
         if preview_rules is not None:
             markup = preview_rules.get("global_markup")
             if markup is not None and markup != 0:
@@ -102,7 +142,6 @@ async def calculate_final_price(
 
     after_rules = round(price, 2)
 
-    # --- Step 3: Rounding ---
     if preview_rules is not None:
         do_round = preview_rules.get("rounding_enabled", False)
     else:
@@ -111,7 +150,6 @@ async def calculate_final_price(
             do_round = False
 
     if do_round:
-        # Leer configuración de redondeo por rango
         threshold_val = await _get_setting(pool, "rounding_threshold")
         low_mode_val = await _get_setting(pool, "rounding_low_mode")
         high_mode_val = await _get_setting(pool, "rounding_high_mode")
