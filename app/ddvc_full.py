@@ -80,7 +80,12 @@ class DDVCFetchIntegrityError(RuntimeError):
 
 
 def gql(graphql_url: str, query: str, variables: dict, timeout_s: float) -> dict:
-    response = requests.post(graphql_url, json={"query": query, "variables": variables}, timeout=timeout_s)
+    response = requests.post(
+        graphql_url,
+        json={"query": query, "variables": variables},
+        timeout=timeout_s,
+        headers={"User-Agent": "Agente-Portales-Libertad"},
+    )
     response.raise_for_status()
     data = response.json()
     errors = data.get("errors")

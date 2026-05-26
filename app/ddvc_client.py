@@ -130,7 +130,10 @@ async def fetch_ddvc_chunks(
 
     results: Dict[str, DdvcItem] = {}
     failed_chunks: Dict[int, List[str]] = {}
-    async with httpx.AsyncClient(timeout=client.timeout_s) as http_client:
+    async with httpx.AsyncClient(
+        timeout=client.timeout_s,
+        headers={"User-Agent": "Agente-Portales-Libertad"},
+    ) as http_client:
         tasks = [client.fetch_chunk(http_client, chunk) for chunk in chunks]
         responses = await asyncio.gather(*tasks)
 
