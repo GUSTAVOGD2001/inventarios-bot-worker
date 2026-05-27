@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 
 from .config import settings
 from .db import close_pool, create_pool, run_migrations
-from .routers import exemptions, health, inventory, prices, pricing, settings as settings_router, skus, stats, worker, analytics
+from .routers import exemptions, health, inventory, prices, pricing, settings as settings_router, skus, stats, worker, analytics, proyecto_libertad
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +56,7 @@ app.include_router(health.router, prefix="/api/v1", tags=["health"])
 app.include_router(analytics.router, prefix="/api/v1", tags=["analytics"])
 
 
+
 @app.get("/health")
 async def health_ping():
     return {"status": "ok"}
@@ -64,3 +65,5 @@ async def health_ping():
 @app.get("/api/v1/docs")
 async def docs_redirect():
     return RedirectResponse(url="/docs")
+
+app.include_router(proyecto_libertad.router, prefix="/api/v1", tags=["proyecto_libertad"])
