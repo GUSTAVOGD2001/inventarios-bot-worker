@@ -165,3 +165,30 @@ class SkuExemptionUpdate(BaseModel):
     exempt_inventory: bool | None = None
     exempt_price: bool | None = None
     notes: str | None = None
+
+
+# --- Shops (Multi-tienda) ---
+
+class ShopCreate(BaseModel):
+    name: str = Field(..., max_length=200)
+    slug: str = Field(..., max_length=50, pattern=r"^[a-z0-9-]+$")
+    shopify_shop: str = Field(..., max_length=200)
+    shopify_client_id: str = Field(..., max_length=200)
+    shopify_client_secret: str = Field(..., max_length=200)
+    shopify_api_version: str = "2026-01"
+    in_stock_qty: int = 100
+    out_of_stock_qty: int = 0
+    is_active: bool = True
+    notes: str | None = None
+
+
+class ShopUpdate(BaseModel):
+    name: str | None = Field(None, max_length=200)
+    shopify_shop: str | None = Field(None, max_length=200)
+    shopify_client_id: str | None = Field(None, max_length=200)
+    shopify_client_secret: str | None = Field(None, max_length=200)
+    shopify_api_version: str | None = None
+    in_stock_qty: int | None = None
+    out_of_stock_qty: int | None = None
+    is_active: bool | None = None
+    notes: str | None = None
