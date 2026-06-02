@@ -144,6 +144,21 @@ def ensure_schema(engine: Engine) -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                DO $$ BEGIN
+                    ALTER TABLE shops ADD COLUMN IF NOT EXISTS api_panel_url VARCHAR(500);
+                    ALTER TABLE shops ADD COLUMN IF NOT EXISTS bridge_api_key VARCHAR(200);
+                    ALTER TABLE shops ADD COLUMN IF NOT EXISTS price_mode VARCHAR(20) DEFAULT 'raw_ddvc';
+                    ALTER TABLE shops ADD COLUMN IF NOT EXISTS last_sync_status VARCHAR(20);
+                    ALTER TABLE shops ADD COLUMN IF NOT EXISTS last_sync_error TEXT;
+                    ALTER TABLE shops ADD COLUMN IF NOT EXISTS last_sync_details JSONB;
+                EXCEPTION WHEN others THEN NULL;
+                END $$;
+                """
+            )
+        )
 
 
 def try_lock(conn: Connection) -> bool:
