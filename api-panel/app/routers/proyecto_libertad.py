@@ -266,12 +266,15 @@ async def create_shop(body: ShopCreate):
         row = await pool.fetchrow(
             """INSERT INTO shops (name, slug, shopify_shop, shopify_client_id,
                shopify_client_secret, shopify_api_version, in_stock_qty,
-               out_of_stock_qty, is_active, notes)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *""",
+               out_of_stock_qty, is_active, notes,
+               api_panel_url, bridge_api_key, price_mode)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+               RETURNING *""",
             body.name, body.slug.lower(), body.shopify_shop,
             body.shopify_client_id, body.shopify_client_secret,
             body.shopify_api_version, body.in_stock_qty,
             body.out_of_stock_qty, body.is_active, body.notes,
+            body.api_panel_url, body.bridge_api_key, body.price_mode,
         )
     except Exception as e:
         if "unique" in str(e).lower():
@@ -289,7 +292,8 @@ async def update_shop(shop_id: int, body: ShopUpdate):
         raise HTTPException(status_code=404, detail="Tienda no encontrada")
     fields, params, idx = [], [], 1
     for f in ("name", "shopify_shop", "shopify_client_id", "shopify_client_secret",
-              "shopify_api_version", "in_stock_qty", "out_of_stock_qty", "is_active", "notes"):
+              "shopify_api_version", "in_stock_qty", "out_of_stock_qty", "is_active", "notes",
+              "api_panel_url", "bridge_api_key", "price_mode"):
         val = getattr(body, f)
         if val is not None:
             fields.append(f"{f} = ${idx}")
@@ -315,6 +319,102 @@ async def delete_shop(shop_id: int):
     if shop["is_primary"]:
         raise HTTPException(status_code=400, detail="No se puede eliminar la tienda primaria")
     await pool.execute("DELETE FROM shops WHERE id = $1", shop_id)
+
+
+@router.get("/proyecto-libertad/shops/{shop_id}/sync-status")
+@log_endpoint_errors
+async def shop_sync_status(shop_id: int):
+    """Estado detallado de la última sincronización de una tienda."""
+    pool = await get_pool()
+    shop = await pool.fetchrow("SELECT * FROM shops WHERE id = $1", shop_id)
+    if not shop:
+        raise HTTPException(status_code=404, detail="Tienda no encontrada")
+    shop_dict = dict(shop)
+    details = shop_dict.get("last_sync_details")
+    if isinstance(details, str):
+        import json
+        try:
+            details = json.loads(details)
+        except Exception:
+            pass
+    return {
+        "shop_id": shop_dict["id"],
+        "name": shop_dict["name"],
+        "last_sync_at": shop_dict.get("last_sync_at"),
+        "last_sync_status": shop_dict.get("last_sync_status"),
+        "last_sync_error": shop_dict.get("last_sync_error"),
+        "last_sync_details": details,
+        "api_panel_url": shop_dict.get("api_panel_url"),
+        "price_mode": shop_dict.get("price_mode"),
+    }
+
+
+@router.post("/proyecto-libertad/shops/{shop_id}/ping-panel")
+@log_endpoint_errors
+async def ping_client_panel(shop_id: int):
+    """Verifica si el api-panel del cliente está respondiendo."""
+    pool = await get_pool()
+    shop = await pool.fetchrow("SELECT * FROM shops WHERE id = $1", shop_id)
+    if not shop:
+        raise HTTPException(status_code=404, detail="Tienda no encontrada")
+    shop_dict = dict(shop)
+    api_url = shop_dict.get("api_panel_url")
+    bridge_key = shop_dict.get("bridge_api_key")
+    if not api_url or api_url == "placeholder":
+        return {"success": False, "error": "URL del panel no configurada"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{api_url.rstrip('/')}/api/v1/bridge/health",
+                headers={"X-Bridge-Key": bridge_key or ""},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {"success": True, "response": data}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@router.get("/proyecto-libertad/distribution-status")
+@log_endpoint_errors
+async def distribution_status():
+    """Resumen del estado de distribución a todas las tiendas."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT id, name, slug, is_primary, is_active,
+                  api_panel_url, price_mode,
+                  last_sync_at, last_sync_status, last_sync_error
+           FROM shops ORDER BY is_primary DESC, name"""
+    )
+    shops = []
+    for r in rows:
+        shop = dict(r)
+        if shop["is_primary"]:
+            shop["distribution_status"] = "n/a"
+        elif not shop.get("api_panel_url") or shop["api_panel_url"] == "placeholder":
+            shop["distribution_status"] = "not_configured"
+        elif shop.get("last_sync_status") == "ok":
+            shop["distribution_status"] = "ok"
+        elif shop.get("last_sync_status") == "error":
+            shop["distribution_status"] = "error"
+        else:
+            shop["distribution_status"] = "never_synced"
+        shops.append(shop)
+
+    ok_count = sum(1 for s in shops if s["distribution_status"] == "ok")
+    error_count = sum(1 for s in shops if s["distribution_status"] == "error")
+    pending_count = sum(
+        1 for s in shops
+        if s["distribution_status"] in ("not_configured", "never_synced")
+    )
+
+    return {
+        "total_shops": len(shops),
+        "ok": ok_count,
+        "errors": error_count,
+        "pending": pending_count,
+        "shops": shops,
+    }
 
 
 @router.post("/proyecto-libertad/shops/{shop_id}/test-connection")
