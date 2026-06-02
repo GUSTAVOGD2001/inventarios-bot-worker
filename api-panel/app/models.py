@@ -180,6 +180,9 @@ class ShopCreate(BaseModel):
     out_of_stock_qty: int = 0
     is_active: bool = True
     notes: str | None = None
+    api_panel_url: str | None = None
+    bridge_api_key: str | None = None
+    price_mode: str = "raw_ddvc"
 
 
 class ShopUpdate(BaseModel):
@@ -192,3 +195,6 @@ class ShopUpdate(BaseModel):
     out_of_stock_qty: int | None = None
     is_active: bool | None = None
     notes: str | None = None
+    api_panel_url: str | None = None
+    bridge_api_key: str | None = None
+    price_mode: str | None = None
