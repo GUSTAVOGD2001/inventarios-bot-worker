@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Dict, List, Optional, Tuple
 
+import requests as sync_requests
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
@@ -32,6 +33,156 @@ def _stringify(value: Optional[float | int]) -> Optional[str]:
     if value is None:
         return None
     return str(value)
+
+
+def _distribute_to_shops(engine: Engine, ddvc_map: dict, settings: Settings) -> None:
+    """Distribuye datos DDVC a todas las tiendas secundarias activas."""
+    with engine.connect() as conn:
+        shops = conn.execute(
+            text("""
+                SELECT id, name, slug, api_panel_url, bridge_api_key,
+                       price_mode, is_active, shopify_shop
+                FROM shops
+                WHERE is_active = true AND is_primary = false
+                  AND api_panel_url IS NOT NULL
+                  AND api_panel_url != ''
+                  AND api_panel_url != 'placeholder'
+            """)
+        ).fetchall()
+
+    if not shops:
+        logger.info("No secondary shops to distribute to")
+        return
+
+    logger.info("Distributing DDVC data to %s secondary shops", len(shops))
+
+    # Preparar payload base: SKUs con precio y disponibilidad
+    sku_data = {}
+    for sku, data in ddvc_map.items():
+        if not sku:
+            continue
+        final_price = data.get("final_price")
+        regular_price = data.get("regular_price")
+        price = regular_price if regular_price is not None else final_price
+        if price is None:
+            continue
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            continue
+
+        is_salable = data.get("is_salable")
+        stock_status = data.get("stock_status")
+
+        sku_data[sku] = {
+            "ddvc_price": price,
+            "is_salable": is_salable,
+            "stock_status": stock_status,
+        }
+
+    # Si el modo es "with_my_markup", también necesitamos los precios procesados
+    # Los cargamos del pricing engine de Libertad
+    pricing_engine = PricingEngine(engine)
+    pricing_engine.load_rules()
+
+    my_markup_prices = {}
+    for sku, data in sku_data.items():
+        try:
+            result = pricing_engine.calculate(sku, data["ddvc_price"])
+            my_markup_prices[sku] = result.final_price
+        except Exception:
+            my_markup_prices[sku] = data["ddvc_price"]
+
+    for shop_row in shops:
+        shop_id = shop_row[0]
+        shop_name = shop_row[1]
+        api_panel_url = shop_row[3]
+        bridge_api_key = shop_row[4]
+        price_mode = shop_row[5] or "raw_ddvc"
+
+        logger.info("Distributing to shop=%s (%s) mode=%s", shop_id, shop_name, price_mode)
+
+        # Preparar payload según price_mode
+        payload_skus = {}
+        for sku, data in sku_data.items():
+            entry = {
+                "ddvc_price": data["ddvc_price"],
+                "is_salable": data["is_salable"],
+                "stock_status": data.get("stock_status"),
+            }
+            if price_mode == "with_my_markup":
+                entry["source_price"] = my_markup_prices.get(sku, data["ddvc_price"])
+            else:
+                entry["source_price"] = data["ddvc_price"]
+            payload_skus[sku] = entry
+
+        # Enviar en chunks (máx 2000 SKUs por request para no timeout)
+        chunk_size = 2000
+        sku_items = list(payload_skus.items())
+        chunks = [sku_items[i:i + chunk_size] for i in range(0, len(sku_items), chunk_size)]
+
+        total_sent = 0
+        sync_error = None
+        sync_result = {}
+
+        for chunk_idx, chunk in enumerate(chunks):
+            try:
+                resp = sync_requests.post(
+                    f"{api_panel_url.rstrip('/')}/api/v1/bridge/push-sync",
+                    json={
+                        "skus": dict(chunk),
+                        "chunk_index": chunk_idx,
+                        "total_chunks": len(chunks),
+                        "source": "libertad-worker",
+                        "price_mode": price_mode,
+                    },
+                    headers={
+                        "X-Bridge-Key": bridge_api_key,
+                        "User-Agent": "Agente-Portales-Libertad",
+                    },
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                total_sent += len(chunk)
+                sync_result = result  # Último chunk tiene el resumen
+                logger.info(
+                    "Shop %s chunk %s/%s: sent=%s response=%s",
+                    shop_id, chunk_idx + 1, len(chunks), len(chunk),
+                    {k: v for k, v in result.items() if k != "details"}
+                )
+            except Exception as exc:
+                sync_error = f"Chunk {chunk_idx + 1}/{len(chunks)}: {str(exc)[:500]}"
+                logger.error("Shop %s distribution failed: %s", shop_id, exc)
+                break
+
+        # Actualizar estado de la tienda
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    UPDATE shops SET
+                        last_sync_at = NOW(),
+                        last_sync_status = :status,
+                        last_sync_error = :error,
+                        last_sync_details = CAST(:details AS JSONB)
+                    WHERE id = :id
+                """),
+                {
+                    "id": shop_id,
+                    "status": "error" if sync_error else "ok",
+                    "error": sync_error,
+                    "details": json.dumps({
+                        "skus_sent": total_sent,
+                        "price_mode": price_mode,
+                        "result": sync_result if not sync_error else None,
+                    }),
+                },
+            )
+
+        if sync_error:
+            logger.error("Shop %s sync failed: %s", shop_id, sync_error)
+        else:
+            logger.info("Shop %s sync OK: %s SKUs distributed", shop_id, total_sent)
 
 
 def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, run_id: str) -> None:
@@ -641,6 +792,13 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 )
             if ddvc_only_count > 0:
                 logger.info("Registered %s DDVC-only SKUs in sku_state", ddvc_only_count)
+
+            # ── FASE 3: Distribuir a tiendas secundarias ──
+            try:
+                _distribute_to_shops(engine, ddvc_map, settings)
+            except Exception as exc:
+                logger.error("Shop distribution failed: %s", exc, exc_info=True)
+                # No hacer raise — la sync de Libertad ya terminó OK
         except DDVCFetchIntegrityError:
             raise
         except Exception as exc:
