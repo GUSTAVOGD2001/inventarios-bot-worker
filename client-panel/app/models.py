@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+# --- Pagination ---
+
+class PaginatedResponse(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    items: list[Any]
+
+
+# --- Pricing Rules ---
+
+class PricingRuleCreate(BaseModel):
+    name: str = Field(..., max_length=100)
+    rule_type: str = Field(..., pattern=r"^(percentage|fixed_amount)$")
+    value: float
+    priority: int = 0
+    is_active: bool = True
+
+
+class PricingRuleUpdate(BaseModel):
+    name: str | None = Field(None, max_length=100)
+    rule_type: str | None = Field(None, pattern=r"^(percentage|fixed_amount)$")
+    value: float | None = None
+    priority: int | None = None
+    is_active: bool | None = None
+
+
+class PricingRuleOut(BaseModel):
+    id: int
+    name: str
+    rule_type: str
+    value: float
+    priority: int
+    is_active: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+# --- SKU Overrides ---
+
+class SkuOverrideCreate(BaseModel):
+    sku: str = Field(..., max_length=100)
+    override_type: str = Field(..., pattern=r"^(fixed_price|percentage|fixed_amount)$")
+    value: float
+    is_active: bool = True
+    notes: str | None = None
+
+
+class SkuOverrideUpdate(BaseModel):
+    sku: str | None = Field(None, max_length=100)
+    override_type: str | None = Field(None, pattern=r"^(fixed_price|percentage|fixed_amount)$")
+    value: float | None = None
+    is_active: bool | None = None
+    notes: str | None = None
+
+
+
+
+class SkuPrefixOverrideCreate(BaseModel):
+    sku_prefix: str = Field(..., max_length=50, min_length=1)
+    override_type: str = Field(..., pattern=r"^(fixed_price|percentage|fixed_amount)$")
+    value: float
+    is_active: bool = True
+    notes: str | None = None
+
+
+class SkuPrefixOverrideUpdate(BaseModel):
+    sku_prefix: str | None = Field(None, max_length=50)
+    override_type: str | None = Field(None, pattern=r"^(fixed_price|percentage|fixed_amount)$")
+    value: float | None = None
+    is_active: bool | None = None
+    notes: str | None = None
+class SkuOverrideOut(BaseModel):
+    id: int
+    sku: str
+    override_type: str
+    value: float
+    is_active: bool
+    notes: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+# --- Settings ---
+
+class SettingsPatch(BaseModel):
+    model_config = {"extra": "allow"}
+
+
+# --- Worker ---
+
+class WorkerTrigger(BaseModel):
+    dry_run: bool = True
+
+
+class WorkerStatusOut(BaseModel):
+    status: str
+    last_sync: dict | None = None
+    next_sync_estimated: str | None = None
+    dry_run: bool | None = None
+
+
+# --- Pricing Simulate ---
+
+class SimulateRequest(BaseModel):
+    skus: list[str]
+    preview_rules: dict | None = None
+
+
+class PriceCalculation(BaseModel):
+    sku: str
+    ddvc_price: float | None
+    override_applied: str | None = None
+    global_rule_applied: str | None = None
+    after_rules: float | None = None
+    rounding_applied: bool = False
+    final_price: float | None = None
+    margin_amount: float | None = None
+    margin_percent: float | None = None
+    steps: list[str] = []
+
+
+# --- SKU Analysis ---
+
+class SkuAnalysis(BaseModel):
+    sku: str
+    shopify: dict | None = None
+    ddvc: dict | None = None
+    pricing: PriceCalculation | None = None
+    history: list[dict] = []
+
+
+# --- Stats ---
+
+class StatsSummary(BaseModel):
+    shopify_variants_count: int = 0
+    sku_state_count: int = 0
+    matched: int = 0
+    ddvc_only: int = 0
+    shopify_only: int = 0
+    in_stock: int = 0
+    out_of_stock: int = 0
+    changes_today: int = 0
+    settings: dict = {}
+
+
+# --- SKU Exemptions ---
+
+class SkuExemptionCreate(BaseModel):
+    sku: str = Field(..., max_length=100)
+    exempt_inventory: bool = False
+    exempt_price: bool = False
+    notes: str | None = None
+
+
+class SkuExemptionUpdate(BaseModel):
+    exempt_inventory: bool | None = None
+    exempt_price: bool | None = None
+    notes: str | None = None
+
+
+# --- Shops (Multi-tienda) ---
+
+class ShopCreate(BaseModel):
+    name: str = Field(..., max_length=200)
+    slug: str = Field(..., max_length=50, pattern=r"^[a-z0-9-]+$")
+    shopify_shop: str = Field(..., max_length=200)
+    shopify_client_id: str = Field(..., max_length=200)
+    shopify_client_secret: str = Field(..., max_length=200)
+    shopify_api_version: str = "2026-01"
+    in_stock_qty: int = 100
+    out_of_stock_qty: int = 0
+    is_active: bool = True
+    notes: str | None = None
+    api_panel_url: str | None = None
+    bridge_api_key: str | None = None
+    price_mode: str = "raw_ddvc"
+
+
+class ShopUpdate(BaseModel):
+    name: str | None = Field(None, max_length=200)
+    shopify_shop: str | None = Field(None, max_length=200)
+    shopify_client_id: str | None = Field(None, max_length=200)
+    shopify_client_secret: str | None = Field(None, max_length=200)
+    shopify_api_version: str | None = None
+    in_stock_qty: int | None = None
+    out_of_stock_qty: int | None = None
+    is_active: bool | None = None
+    notes: str | None = None
+    api_panel_url: str | None = None
+    bridge_api_key: str | None = None
+    price_mode: str | None = None
