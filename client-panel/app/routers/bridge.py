@@ -90,6 +90,7 @@ async def push_sync(body: dict):
     chunk_index = int(body.get("chunk_index", 0))
     total_chunks = int(body.get("total_chunks", 1))
     price_mode = body.get("price_mode", "raw_ddvc")
+    dashboard_only = body.get("dashboard_only", False)
     run_id = uuid.uuid4().hex[:8]
 
     logger.info(
@@ -213,7 +214,7 @@ async def push_sync(body: dict):
     apply_error = None
     is_last_chunk = (chunk_index + 1) >= total_chunks
 
-    if inventory_changes or price_changes:
+    if not dashboard_only and (inventory_changes or price_changes):
         try:
             token = await _get_shopify_token()
             if token:
@@ -381,7 +382,7 @@ async def _apply_inventory_changes(token: str, changes: list) -> int:
         locations = loc_resp.json().get("data", {}).get("locations", {}).get("nodes", [])
         if not locations:
             raise RuntimeError("No Shopify locations returned")
-        location_id = next((l["id"] for l in locations if l.get("isActive")), locations[0]["id"])
+        location_id = next((loc["id"] for loc in locations if loc.get("isActive")), locations[0]["id"])
 
         mutation = """
         mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {

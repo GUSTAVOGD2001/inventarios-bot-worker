@@ -36,17 +36,19 @@ def _stringify(value: Optional[float | int]) -> Optional[str]:
 
 
 def _distribute_to_shops(engine: Engine, ddvc_map: dict, settings: Settings) -> None:
-    """Distribuye datos DDVC a todas las tiendas secundarias activas."""
+    """Distribuye datos DDVC a tiendas secundarias aplicando cambios directo a su Shopify."""
     with engine.connect() as conn:
         shops = conn.execute(
             text("""
-                SELECT id, name, slug, api_panel_url, bridge_api_key,
-                       price_mode, is_active, shopify_shop
+                SELECT id, name, slug, shopify_shop, shopify_client_id,
+                       shopify_client_secret, shopify_api_version,
+                       in_stock_qty, out_of_stock_qty,
+                       api_panel_url, bridge_api_key, price_mode
                 FROM shops
                 WHERE is_active = true AND is_primary = false
-                  AND api_panel_url IS NOT NULL
-                  AND api_panel_url != ''
-                  AND api_panel_url != 'placeholder'
+                  AND shopify_shop IS NOT NULL
+                  AND shopify_shop != ''
+                  AND shopify_shop != 'placeholder'
             """)
         ).fetchall()
 
@@ -54,109 +56,149 @@ def _distribute_to_shops(engine: Engine, ddvc_map: dict, settings: Settings) -> 
         logger.info("No secondary shops to distribute to")
         return
 
-    logger.info("Distributing DDVC data to %s secondary shops", len(shops))
+    logger.info("Distributing to %s secondary shops", len(shops))
 
-    # Preparar payload base: SKUs con precio y disponibilidad
-    sku_data = {}
-    for sku, data in ddvc_map.items():
-        if not sku:
-            continue
-        final_price = data.get("final_price")
-        regular_price = data.get("regular_price")
-        price = regular_price if regular_price is not None else final_price
-        if price is None:
-            continue
-        try:
-            price = float(price)
-        except (TypeError, ValueError):
-            continue
-
-        is_salable = data.get("is_salable")
-        stock_status = data.get("stock_status")
-
-        sku_data[sku] = {
-            "ddvc_price": price,
-            "is_salable": is_salable,
-            "stock_status": stock_status,
-        }
-
-    # Si el modo es "with_my_markup", también necesitamos los precios procesados
-    # Los cargamos del pricing engine de Libertad
+    # Cargar pricing engine de Libertad para mode=with_my_markup
     pricing_engine = PricingEngine(engine)
     pricing_engine.load_rules()
 
-    my_markup_prices = {}
-    for sku, data in sku_data.items():
-        try:
-            result = pricing_engine.calculate(sku, data["ddvc_price"])
-            my_markup_prices[sku] = result.final_price
-        except Exception:
-            my_markup_prices[sku] = data["ddvc_price"]
-
     for shop_row in shops:
-        shop_id = shop_row[0]
-        shop_name = shop_row[1]
-        api_panel_url = shop_row[3]
-        bridge_api_key = shop_row[4]
-        price_mode = shop_row[5] or "raw_ddvc"
+        shop_id       = shop_row[0]
+        shop_name     = shop_row[1]
+        shopify_shop  = shop_row[3]
+        client_id     = shop_row[4]
+        client_secret = shop_row[5]
+        api_version   = shop_row[6] or "2026-01"
+        in_stock_qty  = shop_row[7] or 100
+        out_stock_qty = shop_row[8] or 0
+        api_panel_url = shop_row[9]
+        bridge_key    = shop_row[10]
+        price_mode    = shop_row[11] or "raw_ddvc"
 
-        logger.info("Distributing to shop=%s (%s) mode=%s", shop_id, shop_name, price_mode)
-
-        # Preparar payload según price_mode
-        payload_skus = {}
-        for sku, data in sku_data.items():
-            entry = {
-                "ddvc_price": data["ddvc_price"],
-                "is_salable": data["is_salable"],
-                "stock_status": data.get("stock_status"),
-            }
-            if price_mode == "with_my_markup":
-                entry["source_price"] = my_markup_prices.get(sku, data["ddvc_price"])
-            else:
-                entry["source_price"] = data["ddvc_price"]
-            payload_skus[sku] = entry
-
-        # Enviar en chunks (máx 2000 SKUs por request para no timeout)
-        chunk_size = 2000
-        sku_items = list(payload_skus.items())
-        chunks = [sku_items[i:i + chunk_size] for i in range(0, len(sku_items), chunk_size)]
-
-        total_sent = 0
+        logger.info(
+            "Shop %s (%s): fetching Shopify snapshot...", shop_id, shop_name
+        )
         sync_error = None
-        sync_result = {}
+        inv_applied = 0
+        price_applied = 0
 
-        for chunk_idx, chunk in enumerate(chunks):
-            try:
-                resp = sync_requests.post(
-                    f"{api_panel_url.rstrip('/')}/api/v1/bridge/push-sync",
-                    json={
-                        "skus": dict(chunk),
-                        "chunk_index": chunk_idx,
-                        "total_chunks": len(chunks),
-                        "source": "libertad-worker",
-                        "price_mode": price_mode,
-                    },
-                    headers={
-                        "X-Bridge-Key": bridge_api_key,
-                        "User-Agent": "Agente-Portales-Libertad",
-                    },
-                    timeout=120,
-                )
-                resp.raise_for_status()
-                result = resp.json()
-                total_sent += len(chunk)
-                sync_result = result  # Último chunk tiene el resumen
-                logger.info(
-                    "Shop %s chunk %s/%s: sent=%s response=%s",
-                    shop_id, chunk_idx + 1, len(chunks), len(chunk),
-                    {k: v for k, v in result.items() if k != "details"}
-                )
-            except Exception as exc:
-                sync_error = f"Chunk {chunk_idx + 1}/{len(chunks)}: {str(exc)[:500]}"
-                logger.error("Shop %s distribution failed: %s", shop_id, exc)
-                break
+        try:
+            # Crear ShopifyClient para esta tienda
+            shop_client = ShopifyClient(
+                shop=shopify_shop,
+                client_id=client_id,
+                client_secret=client_secret,
+                api_version=api_version,
+            )
 
-        # Actualizar estado de la tienda
+            # Obtener location_id
+            location_id = shop_client.get_location_id()
+            logger.info("Shop %s location_id=%s", shop_id, location_id)
+
+            # Obtener snapshot actual de Shopify del cliente
+            snapshot = shop_client.fetch_variant_snapshot(location_id)
+            shopify_map = _normalize_snapshot(snapshot)
+            logger.info(
+                "Shop %s snapshot: %s variants", shop_id, len(shopify_map)
+            )
+
+            # Construir inventario target y precio target para cada SKU
+            inventory_updates = []   # (inventory_item_id, qty)
+            price_updates = []       # (product_id, variant_id, price)
+
+            for sku_norm, shopify_item in shopify_map.items():
+                ddvc_item = ddvc_map.get(sku_norm)
+                if not ddvc_item:
+                    # SKU no en DDVC → poner en 0
+                    if shopify_item.quantity != out_stock_qty:
+                        inventory_updates.append(
+                            (shopify_item.inventory_item_id, out_stock_qty)
+                        )
+                    continue
+
+                # Disponibilidad
+                is_salable = ddvc_item.get("is_salable")
+                stock_status = ddvc_item.get("stock_status")
+                stock_norm = (stock_status or "").upper() if isinstance(stock_status, str) else None
+                available = stock_norm == "IN_STOCK" or is_salable is True
+                explicit_oos = stock_norm == "OUT_OF_STOCK" or is_salable is False
+                target_qty = (
+                    in_stock_qty if available else
+                    out_stock_qty if explicit_oos else
+                    in_stock_qty
+                )
+
+                # Inventario
+                if shopify_item.quantity != target_qty:
+                    inventory_updates.append(
+                        (shopify_item.inventory_item_id, target_qty)
+                    )
+
+                # Precio
+                regular_price = ddvc_item.get("regular_price")
+                final_price_raw = ddvc_item.get("final_price")
+                ddvc_price = regular_price if regular_price is not None else final_price_raw
+                if ddvc_price is None:
+                    continue
+                try:
+                    ddvc_price = float(ddvc_price)
+                except (TypeError, ValueError):
+                    continue
+
+                if price_mode == "with_my_markup":
+                    try:
+                        result = pricing_engine.calculate(sku_norm, ddvc_price)
+                        target_price = result.final_price
+                    except Exception:
+                        target_price = ddvc_price
+                else:
+                    target_price = ddvc_price
+
+                if abs(shopify_item.price - target_price) > 0.01:
+                    price_updates.append(
+                        (shopify_item.product_id, shopify_item.variant_id, target_price)
+                    )
+
+            logger.info(
+                "Shop %s planned: inventory_changes=%s price_changes=%s",
+                shop_id, len(inventory_updates), len(price_updates),
+            )
+
+            # Aplicar cambios de inventario
+            if inventory_updates:
+                shop_client.update_inventory(location_id, inventory_updates)
+                inv_applied = len(inventory_updates)
+                logger.info("Shop %s inventory applied: %s", shop_id, inv_applied)
+
+            # Aplicar cambios de precio
+            if price_updates:
+                shop_client.update_prices(price_updates)
+                price_applied = len(price_updates)
+                logger.info("Shop %s prices applied: %s", shop_id, price_applied)
+
+            shop_client.close()
+
+            # Notificar al client-panel (solo para dashboard, sin esperar Shopify)
+            if api_panel_url and api_panel_url != "placeholder" and bridge_key:
+                try:
+                    _notify_client_panel(
+                        api_panel_url=api_panel_url,
+                        bridge_key=bridge_key,
+                        ddvc_map=ddvc_map,
+                        price_mode=price_mode,
+                        pricing_engine=pricing_engine,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Shop %s client-panel notify failed (non-critical): %s",
+                        shop_id, exc,
+                    )
+
+        except Exception as exc:
+            sync_error = str(exc)[:500]
+            logger.error("Shop %s sync failed: %s", shop_id, exc, exc_info=True)
+
+        # Actualizar estado en BD
         with engine.begin() as conn:
             conn.execute(
                 text("""
@@ -172,17 +214,86 @@ def _distribute_to_shops(engine: Engine, ddvc_map: dict, settings: Settings) -> 
                     "status": "error" if sync_error else "ok",
                     "error": sync_error,
                     "details": json.dumps({
-                        "skus_sent": total_sent,
+                        "inventory_applied": inv_applied,
+                        "prices_applied": price_applied,
                         "price_mode": price_mode,
-                        "result": sync_result if not sync_error else None,
                     }),
                 },
             )
 
-        if sync_error:
-            logger.error("Shop %s sync failed: %s", shop_id, sync_error)
+        if not sync_error:
+            logger.info(
+                "Shop %s sync OK: inv=%s prices=%s",
+                shop_id, inv_applied, price_applied,
+            )
+
+
+def _notify_client_panel(
+    api_panel_url: str,
+    bridge_key: str,
+    ddvc_map: dict,
+    price_mode: str,
+    pricing_engine: PricingEngine,
+) -> None:
+    """Envía datos DDVC al client-panel solo para actualizar el dashboard.
+    El client-panel NO debe aplicar a Shopify (el worker ya lo hizo).
+    """
+    sku_items = []
+    for sku, data in ddvc_map.items():
+        if not sku:
+            continue
+        regular_price = data.get("regular_price")
+        final_price_raw = data.get("final_price")
+        ddvc_price = regular_price if regular_price is not None else final_price_raw
+        if ddvc_price is None:
+            continue
+        try:
+            ddvc_price = float(ddvc_price)
+        except (TypeError, ValueError):
+            continue
+
+        if price_mode == "with_my_markup":
+            try:
+                result = pricing_engine.calculate(sku, ddvc_price)
+                source_price = result.final_price
+            except Exception:
+                source_price = ddvc_price
         else:
-            logger.info("Shop %s sync OK: %s SKUs distributed", shop_id, total_sent)
+            source_price = ddvc_price
+
+        sku_items.append((sku, {
+            "ddvc_price": ddvc_price,
+            "source_price": source_price,
+            "is_salable": data.get("is_salable"),
+            "stock_status": data.get("stock_status"),
+        }))
+
+    chunk_size = 2000
+    chunks = [sku_items[i:i + chunk_size] for i in range(0, len(sku_items), chunk_size)]
+    total_chunks = len(chunks)
+
+    for chunk_idx, chunk in enumerate(chunks):
+        try:
+            resp = sync_requests.post(
+                f"{api_panel_url.rstrip('/')}/api/v1/bridge/push-sync",
+                json={
+                    "skus": dict(chunk),
+                    "chunk_index": chunk_idx,
+                    "total_chunks": total_chunks,
+                    "source": "libertad-worker",
+                    "price_mode": price_mode,
+                    "dashboard_only": True,   # El client-panel NO aplica a Shopify
+                },
+                headers={
+                    "X-Bridge-Key": bridge_key,
+                    "User-Agent": "Agente-Portales-Libertad",
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            logger.warning("Client panel notify chunk %s failed: %s", chunk_idx + 1, exc)
+            break
 
 
 def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, run_id: str) -> None:
