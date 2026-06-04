@@ -95,12 +95,9 @@ def _distribute_to_shops(engine: Engine, ddvc_map: dict, settings: Settings) -> 
             location_id = shop_client.get_location_id()
             logger.info("Shop %s location_id=%s", shop_id, location_id)
 
-            # Obtener snapshot actual de Shopify del cliente
-            snapshot = shop_client.fetch_variant_snapshot(location_id)
-            shopify_map = _normalize_snapshot(snapshot)
-            logger.info(
-                "Shop %s snapshot: %s variants", shop_id, len(shopify_map)
-            )
+            # Snapshot optimizado: payload liviano con inventoryLevel singular
+            shopify_map = shop_client.fetch_variant_map_for_distribution(location_id)
+            logger.info("Shop %s snapshot: %s variants", shop_id, len(shopify_map))
 
             # Construir inventario target y precio target para cada SKU
             inventory_updates = []   # (inventory_item_id, qty)
