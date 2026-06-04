@@ -84,7 +84,7 @@ async def get_pricing_config():
 @router.post("/bridge/push-sync", dependencies=[Depends(require_bridge_key)])
 @log_endpoint_errors
 async def push_sync(body: dict):
-    """Recibe datos DDVC, aplica reglas del cliente y actualiza Shopify al cerrar el último chunk."""
+    """Recibe datos DDVC, aplica reglas del cliente y actualiza Shopify por chunk."""
     pool = await get_pool()
     skus_data = body.get("skus", {})
     chunk_index = int(body.get("chunk_index", 0))
@@ -108,6 +108,7 @@ async def push_sync(body: dict):
     if variant_count == 0 or chunk_index == 0:
         try:
             await _refresh_shopify_snapshot(pool)
+            logger.info("Shopify snapshot refreshed")
         except Exception as exc:
             logger.error("Failed to refresh Shopify snapshot: %s", exc)
 
@@ -212,7 +213,7 @@ async def push_sync(body: dict):
     apply_error = None
     is_last_chunk = (chunk_index + 1) >= total_chunks
 
-    if is_last_chunk and (inventory_changes or price_changes):
+    if inventory_changes or price_changes:
         try:
             token = await _get_shopify_token()
             if token:
@@ -220,12 +221,33 @@ async def push_sync(body: dict):
                     applied_inv = await _apply_inventory_changes(token, inventory_changes)
                 if price_changes:
                     applied_price = await _apply_price_changes(token, price_changes)
+                # Actualizar snapshot local con los cambios aplicados
+                for change in inventory_changes:
+                    await pool.execute(
+                        "UPDATE shopify_variants SET current_qty = $1 WHERE sku = $2",
+                        change["new_qty"],
+                        change["sku"],
+                    )
+                for change in price_changes:
+                    await pool.execute(
+                        "UPDATE shopify_variants SET current_price = $1 WHERE sku = $2",
+                        change["new_price"],
+                        change["sku"],
+                    )
                 await pool.execute(
                     "UPDATE price_change_log SET was_applied = true WHERE was_applied = false"
                 )
         except Exception as exc:
             apply_error = str(exc)
             logger.error("Shopify apply failed: %s", exc)
+
+    logger.info(
+        "Chunk %s/%s done: received=%s inv_changes=%s price_changes=%s "
+        "applied_inv=%s applied_prices=%s error=%s",
+        chunk_index + 1, total_chunks, skus_processed,
+        len(inventory_changes), len(price_changes),
+        applied_inv, applied_price, apply_error,
+    )
 
     await pool.execute(
         """INSERT INTO sync_runs (run_id, source, skus_received, inventory_changes, price_changes, finished_at, error, details)
