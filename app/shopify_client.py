@@ -443,7 +443,7 @@ class ShopifyClient:
             return 0
 
         mutation = """
-        mutation inventoryItemUpdate($id: ID!, $input: InventoryItemUpdateInput!) {
+        mutation inventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
             inventoryItemUpdate(id: $id, input: $input) {
                 inventoryItem {
                     id
