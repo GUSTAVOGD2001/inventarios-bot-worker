@@ -161,6 +161,21 @@ def _distribute_to_shops(engine: Engine, ddvc_map: dict, settings: Settings) -> 
                 shop_id, len(inventory_updates), len(price_updates),
             )
 
+            # Habilitar tracking en productos que lo tienen desactivado
+            untracked_ids = [
+                shopify_map[sku].inventory_item_id
+                for sku in shopify_map
+                if not shopify_map[sku].tracked
+            ]
+            if untracked_ids:
+                logger.info(
+                    "Shop %s: enabling inventory tracking for %s untracked items",
+                    shop_id, len(untracked_ids),
+                )
+                shop_client.enable_inventory_tracking(untracked_ids)
+                # Recalcular inventory_updates ahora que todos tienen tracking
+                # (los que ya estaban en inventory_updates siguen siendo válidos)
+
             # Aplicar cambios de inventario
             if inventory_updates:
                 shop_client.update_inventory(location_id, inventory_updates)

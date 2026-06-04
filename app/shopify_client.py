@@ -29,6 +29,7 @@ class ShopifyVariantSnapshot:
     price: float
     quantity: Optional[int]
     title: Optional[str] = None
+    tracked: bool = True
 
 
 class ShopifyClient:
@@ -209,6 +210,7 @@ class ShopifyClient:
                         product { id }
                         inventoryItem {
                             id
+                            tracked
                             inventoryLevel(locationId: $locationId) {
                                 quantities(names: ["available"]) {
                                     name
@@ -233,6 +235,7 @@ class ShopifyClient:
                 product_id = (node.get("product") or {}).get("id")
                 inv = node.get("inventoryItem") or {}
                 inventory_item_id = inv.get("id")
+                tracked = bool(inv.get("tracked", True))
                 if not variant_id or not product_id or not inventory_item_id:
                     continue
 
@@ -259,6 +262,7 @@ class ShopifyClient:
                     price=price,
                     quantity=available,
                     title=None,
+                    tracked=tracked,
                 )
 
             page_info = payload.get("pageInfo", {})
@@ -429,6 +433,54 @@ class ShopifyClient:
                     inventory_item_id = batch[index][0]
                     results[inventory_item_id] = message
         return results
+
+    def enable_inventory_tracking(self, inventory_item_ids: List[str]) -> int:
+        """
+        Habilita el rastreo de inventario para los items que lo tienen desactivado.
+        Retorna la cantidad de items actualizados.
+        """
+        if not inventory_item_ids:
+            return 0
+
+        mutation = """
+        mutation inventoryItemUpdate($id: ID!, $input: InventoryItemUpdateInput!) {
+            inventoryItemUpdate(id: $id, input: $input) {
+                inventoryItem {
+                    id
+                    tracked
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        """
+        updated = 0
+        for item_id in inventory_item_ids:
+            try:
+                data = self._post_graphql(mutation, {
+                    "id": item_id,
+                    "input": {"tracked": True},
+                })
+                payload = data.get("data", {}).get("inventoryItemUpdate", {})
+                errors = payload.get("userErrors") or []
+                if errors:
+                    logger.warning(
+                        "enable_tracking userError item=%s errors=%s",
+                        item_id, errors,
+                    )
+                else:
+                    updated += 1
+            except Exception as exc:
+                logger.warning(
+                    "enable_tracking failed item=%s: %s", item_id, exc
+                )
+        logger.info(
+            "Inventory tracking enabled: %s/%s items",
+            updated, len(inventory_item_ids),
+        )
+        return updated
 
     def update_prices(self, updates: List[Tuple[str, str, float]]) -> Dict[str, Optional[str]]:
         results: Dict[str, Optional[str]] = {}
