@@ -186,6 +186,90 @@ class ShopifyClient:
             cursor = page_info.get("endCursor")
         return variants
 
+    def fetch_variant_map_for_distribution(self, location_id: str) -> Dict[str, "ShopifyVariantSnapshot"]:
+        """
+        Fetch optimizado para tiendas secundarias.
+        Usa inventoryLevel(locationId:) singular — filtra en Shopify, no en cliente.
+        Payload ~40% menor que fetch_variant_snapshot.
+        """
+        result: Dict[str, ShopifyVariantSnapshot] = {}
+        cursor: Optional[str] = None
+        page = 0
+
+        while True:
+            page += 1
+            query = """
+            query ($cursor: String, $locationId: ID!) {
+                productVariants(first: 250, after: $cursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                        id
+                        sku
+                        price
+                        product { id }
+                        inventoryItem {
+                            id
+                            inventoryLevel(locationId: $locationId) {
+                                quantities(names: ["available"]) {
+                                    name
+                                    quantity
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            """
+            data = self._post_graphql(query, {"cursor": cursor, "locationId": location_id})
+            if data.get("errors"):
+                raise RuntimeError(f"Shopify errors in distribution snapshot: {data['errors']}")
+
+            payload = data.get("data", {}).get("productVariants", {})
+            for node in payload.get("nodes", []):
+                sku = normalize_sku(node.get("sku"))
+                if not sku:
+                    continue
+                variant_id = node.get("id")
+                product_id = (node.get("product") or {}).get("id")
+                inv = node.get("inventoryItem") or {}
+                inventory_item_id = inv.get("id")
+                if not variant_id or not product_id or not inventory_item_id:
+                    continue
+
+                level = inv.get("inventoryLevel") or {}
+                available: Optional[int] = None
+                for entry in level.get("quantities") or []:
+                    if entry.get("name") == "available":
+                        try:
+                            available = int(entry["quantity"])
+                        except (TypeError, ValueError):
+                            pass
+                        break
+
+                try:
+                    price = float(node.get("price"))
+                except (TypeError, ValueError):
+                    continue
+
+                result[sku] = ShopifyVariantSnapshot(
+                    sku=sku,
+                    variant_id=variant_id,
+                    product_id=product_id,
+                    inventory_item_id=inventory_item_id,
+                    price=price,
+                    quantity=available,
+                    title=None,
+                )
+
+            page_info = payload.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            logger.info("Distribution snapshot page=%s variants=%s", page, len(result))
+
+        logger.info("Distribution snapshot done: %s variants, %s pages", len(result), page)
+        return result
+
     def fetch_variant_snapshot(self, location_id: Optional[str]) -> List[ShopifyVariantSnapshot]:
         variants: List[ShopifyVariantSnapshot] = []
         cursor: Optional[str] = None
