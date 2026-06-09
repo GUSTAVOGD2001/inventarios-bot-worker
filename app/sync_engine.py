@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 from app import db
 from app.config import Settings
 from app.ddvc_full import DDVCFetchIntegrityError, fetch_ddvc_full
+from app.ddvc_fallback import load_ddvc_snapshot_fallback
 from app.pricing import PricingEngine, load_sku_exemptions, log_price_change
 from app.shopify_client import ShopifyClient, ShopifyVariantSnapshot
 from app.sku_utils import normalize_sku
@@ -384,7 +385,25 @@ def run_sync_once(settings: Settings, engine: Engine, shopify: ShopifyClient, ru
                 "details": {"shopify_rows": len(shopify_map)}
             }))
 
-            ddvc_map = fetch_ddvc_full(graphql_url=settings.ddvc_graphql)
+            try:
+                ddvc_map = fetch_ddvc_full(graphql_url=settings.ddvc_graphql)
+                logger.info("DDVC fetch OK rows=%s", len(ddvc_map))
+            except DDVCFetchIntegrityError as ddvc_exc:
+                logger.warning(
+                    "DDVC fetch falló (%s). Buscando snapshot de respaldo...", ddvc_exc
+                )
+                ddvc_map = load_ddvc_snapshot_fallback(engine)
+                if ddvc_map is None:
+                    logger.error(
+                        "No hay snapshot DDVC válido (< 24h). "
+                        "Abortando sync. Corre worker_manual_con_snapshot.py para generar uno."
+                    )
+                    raise
+                logger.warning(
+                    "⚠️  FALLBACK ACTIVO: sync usando snapshot local con %s SKUs. "
+                    "Los datos pueden tener hasta 24h de antigüedad.",
+                    len(ddvc_map),
+                )
             ddvc_rows = len(ddvc_map)
             logger.info("DDVC map ready rows=%s", ddvc_rows)
 
